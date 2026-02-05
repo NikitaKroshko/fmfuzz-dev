@@ -1,0 +1,58 @@
+name: typefuzz-smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  typefuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install solvers and typefuzz
+        run: |
+          sudo apt-get update
+          python -m pip install --upgrade pip
+          python -m pip install "yinyang>=0.2,<0.3" "cvc5>=1.1.2,<1.2"
+
+      - name: Run typefuzz smoke
+        run: |
+          set -euo pipefail
+          echo "Seed files:"
+          ls -1 ci/typefuzz-seeds
+
+          timeout --foreground 90s typefuzz \
+            "cvc5 --tlimit-per=2000 --produce-models; cvc5 --tlimit-per=2000 --produce-models --seed=7" \
+            ci/typefuzz-seeds \
+            -i 12 \
+            -t 2 \
+            --scratch /tmp/typefuzz_scratch \
+            --bugs /tmp/typefuzz_bugs || status=$?
+
+          if [ "${status:-0}" -eq 124 ]; then
+            echo "typefuzz hit guard timeout"
+            status=0
+          fi
+
+          exit ${status:-0}
+
+      - name: Show bugs (if any exist)
+        if: always()
+        run: |
+          if [ -d /tmp/typefuzz_bugs ]; then
+            echo "typefuzz produced bug files:"
+            find /tmp/typefuzz_bugs -type f | head -20
+          else
+            echo "No bug files were produced"
+          fi

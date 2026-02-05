@@ -1,0 +1,7 @@
+(set-logic QF_UF)
+(declare-const a Bool)
+(declare-const b Bool)
+(assert (=> a b))
+(assert (xor a b))
+(check-sat)
+(get-model)
