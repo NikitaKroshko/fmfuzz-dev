@@ -1,4 +1,4 @@
-name: typefuzz-smoke
+name: typefuzz-test
 
 on:
   workflow_dispatch:
