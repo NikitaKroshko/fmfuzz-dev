@@ -651,7 +651,7 @@ jobs:
           # ${{ github.workspace }}/solvers/cvc4-1.6 --version
           # ${{ github.workspace }}/solvers/z3-4.8.7 --version
 
-      - name: Run Simple Fuzzer on assigned tests
+      - name: Run orchestrator-backed harness on assigned tests
         working-directory: z3
         run: |
           JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
@@ -659,18 +659,13 @@ jobs:
           # Use provided stop_buffer_minutes or default 5 minutes
           STOP_BUFFER=${{ inputs.stop_buffer_minutes || 5 }}
           
-          ${{ github.workspace }}/scripts/z3/commit_fuzzer/simple_commit_fuzzer.py \
+          ${{ github.workspace }}/scripts/z3/commit_fuzzer/run_commit_fuzzer.py \
             --tests-json '${{ toJson(matrix.tests) }}' \
             --job-id '${{ matrix.job_id }}' \
             --tests-root '../z3test' \
             --job-start-time "$JOB_START" \
             --stop-buffer-minutes ${STOP_BUFFER} \
-            --iterations 250 \
-            --z3-path ./build/z3 \
-            --cvc5-path $HOME/.local/bin/cvc5
-            # Old solver versions are not used for now
-            # --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
-            # --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
+            --iterations 250
       
       - name: Upload bugs as artifact
         if: always()
@@ -806,4 +801,3 @@ jobs:
         run: |
           COMMIT_HASH="${{ needs.check-latest-build.outputs.commit_to_fuzz }}"
           python scripts/scheduling/fuzzer.py z3 increment $COMMIT_HASH
-
