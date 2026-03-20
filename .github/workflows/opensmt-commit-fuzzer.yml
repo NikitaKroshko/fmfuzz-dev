@@ -1,0 +1,56 @@
+name: OpenSMT Commit Fuzzer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  commit-fuzzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install yinyang==0.3.0
+
+      - name: Install cvc5 reference solver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cvc5
+          cvc5 --version
+
+      - name: Build OpenSMT
+        run: ./scripts/opensmt/build.sh
+
+      - name: Verify OpenSMT binary
+        run: opensmt --version
+
+      - name: Run orchestrator-backed OpenSMT harness
+        run: |
+          mkdir -p /tmp/opensmt_commit_harness
+          python3 scripts/opensmt/commit_fuzzer/run_commit_fuzzer.py \
+            --tests-json '["test1.smt2","test2.smt2","test3.smt2"]' \
+            --tests-root ci/typefuzz-seeds \
+            --iterations 8 \
+            --workers 1 \
+            --time-remaining 120 \
+            --bugs-folder /tmp/opensmt_commit_harness/bugs
+
+      - name: Upload harness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensmt-commit-harness-artifacts
+          if-no-files-found: ignore
+          path: |
+            /tmp/opensmt_commit_harness/bugs/**
+            logs_*/**
