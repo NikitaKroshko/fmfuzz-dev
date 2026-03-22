@@ -29,7 +29,6 @@ class S3StateConflictError(S3StateError):
 
 # Default state version - change this to switch versions (e.g., "v3" for next version)
 DEFAULT_STATE_VERSION = "v2"
-SUPPORTED_SOLVERS = ("z3", "cvc5", "opensmt")
 
 
 class S3StateManager:
@@ -401,7 +400,7 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='S3 State Management CLI')
-    parser.add_argument('solver', choices=SUPPORTED_SOLVERS, help='Solver name')
+    parser.add_argument('solver', choices=['z3', 'cvc5', 'opensmt'], help='Solver name')
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
     
     # Build queue commands (defaults to v2)

@@ -7,8 +7,6 @@ on:
         description: 'Optional: Commit hash to add to build queue'
         required: false
         type: string
-  schedule:
-    - cron: '*/15 * * * *'  # Run every 15 minutes
 
 jobs:
   manager:
@@ -54,4 +52,3 @@ jobs:
             # Scheduled run: check commits and update queues
             python3 scripts/scheduling/manager.py cvc5 https://github.com/cvc5/cvc5.git --token $GITHUB_TOKEN
           fi
-

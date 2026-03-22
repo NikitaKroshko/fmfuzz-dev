@@ -37,6 +37,9 @@ def filter_tests(tests: list, z3test_dir: Path) -> list:
 def calculate_jobs(total_tests: int, target_jobs: int, max_job_time_minutes: int, 
                    buffer_minutes: int, avg_test_time_seconds: float) -> tuple[int, int]:
     """Calculate optimal number of jobs and tests per job."""
+    if max_job_time_minutes <= buffer_minutes:
+        raise ValueError("max_job_time_minutes must be greater than buffer_minutes")
+
     available_time_seconds = (max_job_time_minutes - buffer_minutes) * 60
     max_tests_per_job = int(available_time_seconds / avg_test_time_seconds)
     min_jobs = (total_tests + max_tests_per_job - 1) // max_tests_per_job
@@ -60,8 +63,8 @@ def calculate_jobs(total_tests: int, target_jobs: int, max_job_time_minutes: int
     return total_jobs, tests_per_job
 
 
-def generate_matrix(z3test_dir: str = "z3test", max_job_time_minutes: int = 360, 
-                    buffer_minutes: int = 60, avg_test_time_seconds: float = 9.5):
+def generate_matrix(z3test_dir: str = "z3test", max_job_time_minutes: int = 60,
+                    buffer_minutes: int = 10, avg_test_time_seconds: float = 9.5):
     """Generate dynamic matrix for coverage mapping jobs."""
     mapper = CoverageMapper(z3test_dir=z3test_dir)
     all_tests = mapper.get_smt2_tests()
@@ -109,8 +112,8 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='Generate dynamic matrix for Z3 coverage mapping')
     parser.add_argument('--z3test-dir', default='z3test', help='Path to z3test directory')
-    parser.add_argument('--max-job-time', type=int, default=360, help='Maximum time per job in minutes')
-    parser.add_argument('--buffer', type=int, default=60, help='Buffer time for setup/teardown in minutes')
+    parser.add_argument('--max-job-time', type=int, default=60, help='Maximum time per job in minutes')
+    parser.add_argument('--buffer', type=int, default=10, help='Buffer time for setup/teardown in minutes')
     parser.add_argument('--avg-test-time', type=float, default=9.5, help='Average test execution time in seconds')
     parser.add_argument('--output', default='matrix.json', help='Output JSON file')
     

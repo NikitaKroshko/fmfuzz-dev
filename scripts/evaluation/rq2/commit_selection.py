@@ -25,7 +25,6 @@ except ImportError as e:
     sys.exit(1)
 
 from scheduling.detect_cpp_changes import detect_cpp_changes
-from scheduling.s3_state import SUPPORTED_SOLVERS
 
 
 class EvaluationS3Manager:
@@ -244,7 +243,7 @@ def select_commits(categorized: Dict, small_count: int, medium_count: int, large
 
 def main():
     parser = argparse.ArgumentParser(description='RQ2 Commit Selection')
-    parser.add_argument('solver', choices=SUPPORTED_SOLVERS)
+    parser.add_argument('solver', choices=['z3', 'cvc5', 'opensmt'])
     parser.add_argument('repo_url')
     parser.add_argument('--years', type=int, default=2)
     parser.add_argument('--token', default=os.getenv('GITHUB_TOKEN'))

@@ -17,7 +17,7 @@ Options:
   --tests-json JSON   JSON array of test names (relative to --tests-root). Required
   --job-id ID         Job identifier (optional, for logging)
   --tests-root PATH   Root dir for tests (default: test/regress/cli)
-  --timeout SECONDS   Timeout per fuzzer process (default: 21600 = 6 hours, use 0 for no timeout)
+  --timeout SECONDS   Timeout per fuzzer process (default: 3600 = 1 hour, use 0 for no timeout)
   --time-remaining SECONDS  Remaining time until job timeout (calculated by workflow). 
                             Script will stop when 5 minutes remain. If not provided, uses --timeout.
   -i, --iterations NUM  Number of iterations per test (default: 2147483647)
@@ -31,7 +31,7 @@ USAGE
 TESTS_JSON=""
 JOB_ID=""
 TESTS_ROOT="test/regress/cli"
-TIMEOUT_SECONDS=21600  # 6 hours (6 * 60 * 60)
+TIMEOUT_SECONDS=3600  # 1 hour (60 * 60)
 TIME_REMAINING=""  # If set, overrides timeout calculation
 ITERATIONS=2147483647
 Z3_OLD_PATH=""

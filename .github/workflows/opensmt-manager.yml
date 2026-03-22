@@ -1,4 +1,4 @@
-name: Z3 Manager
+name: OpenSMT Manager
 
 on:
   workflow_dispatch:
@@ -14,23 +14,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
       - name: Install dependencies
         run: |
           pip install boto3 GitPython requests
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      
+
       - name: Run manager
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
@@ -40,15 +40,15 @@ jobs:
           if [ -n "${{ inputs.commit_hash }}" ]; then
             # Manual trigger: check for C++ changes before adding to build queue
             COMMIT_HASH="${{ inputs.commit_hash }}"
-            if python3 scripts/scheduling/detect_cpp_changes.py https://github.com/Z3Prover/z3.git "$COMMIT_HASH" --token $GITHUB_TOKEN; then
+            if python3 scripts/scheduling/detect_cpp_changes.py https://github.com/usi-verification-and-security/OpenSMT.git "$COMMIT_HASH" --token $GITHUB_TOKEN; then
               echo "✅ Commit $COMMIT_HASH has C++ changes, adding to build queue and fuzzing schedule"
-              python3 scripts/scheduling/s3_state.py z3 build-queue add "$COMMIT_HASH"
-              python3 scripts/scheduling/s3_state.py z3 fuzzing-schedule add "$COMMIT_HASH"
+              python3 scripts/scheduling/s3_state.py opensmt build-queue add "$COMMIT_HASH"
+              python3 scripts/scheduling/s3_state.py opensmt fuzzing-schedule add "$COMMIT_HASH"
             else
               echo "❌ Commit $COMMIT_HASH has no C++ changes, skipping"
               exit 1
             fi
           else
             # Scheduled run: check commits and update queues
-            python3 scripts/scheduling/manager.py z3 https://github.com/Z3Prover/z3.git --token $GITHUB_TOKEN
+            python3 scripts/scheduling/manager.py opensmt https://github.com/usi-verification-and-security/OpenSMT.git --token $GITHUB_TOKEN
           fi

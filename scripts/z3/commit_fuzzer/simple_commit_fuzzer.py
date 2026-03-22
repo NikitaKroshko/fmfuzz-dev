@@ -508,9 +508,9 @@ class SimpleCommitFuzzer:
         return ";".join(solvers)
     
     def _compute_time_remaining(self, job_start_time: float, stop_buffer_minutes: int) -> int:
-        GITHUB_TIMEOUT = 21600
-        MIN_REMAINING = 600
-        
+        GITHUB_TIMEOUT = 3600
+        MIN_REMAINING = 300
+
         build_time = self.start_time - job_start_time
         stop_buffer_seconds = stop_buffer_minutes * 60
         available_time = GITHUB_TIMEOUT - build_time
@@ -932,4 +932,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

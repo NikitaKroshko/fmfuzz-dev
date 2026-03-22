@@ -8,12 +8,7 @@ from typing import Optional
 scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, scripts_dir)
 
-from scheduling.s3_state import (
-    SUPPORTED_SOLVERS,
-    DEFAULT_STATE_VERSION,
-    S3StateError,
-    get_state_manager,
-)
+from scheduling.s3_state import get_state_manager, S3StateError, DEFAULT_STATE_VERSION
 
 
 def get_next_commit_to_build(solver: str) -> Optional[str]:
@@ -49,7 +44,7 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Builder job - check build queue')
-    parser.add_argument('solver', choices=SUPPORTED_SOLVERS, help='Solver name')
+    parser.add_argument('solver', choices=['z3', 'cvc5', 'opensmt'], help='Solver name')
     parser.add_argument('--json', action='store_true', help='Output as JSON')
     
     args = parser.parse_args()

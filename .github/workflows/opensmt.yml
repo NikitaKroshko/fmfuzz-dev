@@ -2,44 +2,332 @@ name: Build OpenSMT
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '0 * * * *'  # Run every hour
+    inputs:
+      opensmt_commit_hash:
+        description: 'Optional: OpenSMT commit hash to add to build queue'
+        required: false
+        type: string
 
 jobs:
-  check-and-build:
+  check-build-queue:
     runs-on: ubuntu-latest
-    
+    outputs:
+      build_needed: ${{ steps.set-outputs.outputs.build_needed }}
+      sha: ${{ steps.set-outputs.outputs.sha }}
+      is_manual_build: ${{ steps.set-outputs.outputs.is_manual_build }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      
-      - name: Restore solver state cache
-        uses: actions/cache@v4
-        id: cache-restore
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: .cache
-          key: solver-opensmt-latest
-          restore-keys: |
-            solver-opensmt-
-      
-      - name: Check for upstream changes
-        id: check-upstream
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check build queue or add manual commit
+        id: set-outputs
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
-          ./scripts/check-upstream.sh opensmt https://github.com/usi-verification-and-security/OpenSMT.git
-          echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
-          echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
-      
-      - name: Save solver state cache
-        if: steps.check-upstream.outputs.build_needed == 'true'
-        uses: actions/cache@v4
+          if [ -n "${{ inputs.opensmt_commit_hash }}" ]; then
+            COMMIT_HASH="${{ inputs.opensmt_commit_hash }}"
+            echo "🔨 Adding provided commit to build queue: $COMMIT_HASH"
+            python scripts/scheduling/s3_state.py opensmt build-queue add "$COMMIT_HASH"
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+            echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
+            echo "is_manual_build=true" >> $GITHUB_OUTPUT
+          else
+            COMMIT_HASH=$(python scripts/scheduling/builder.py opensmt)
+            if [ -n "$COMMIT_HASH" ]; then
+              echo "build_needed=true" >> $GITHUB_OUTPUT
+              echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
+              echo "is_manual_build=false" >> $GITHUB_OUTPUT
+            else
+              echo "build_needed=false" >> $GITHUB_OUTPUT
+              echo "sha=" >> $GITHUB_OUTPUT
+              echo "is_manual_build=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  build-static:
+    needs: check-build-queue
+    if: needs.check-build-queue.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Prepare OpenSMT for commit
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          echo "🔨 Building commit: $COMMIT_HASH"
+          if [ -d "opensmt" ]; then
+            rm -rf opensmt
+          fi
+          git clone https://github.com/usi-verification-and-security/OpenSMT.git opensmt
+          cd opensmt
+          git checkout "$COMMIT_HASH"
+          echo "Checked out commit: $(git rev-parse HEAD)"
+          cd ..
+
+      - name: Build OpenSMT static binary
+        run: bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static
+
+      - name: Get commit hash
+        id: get-commit
+        working-directory: opensmt
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "OpenSMT commit hash: $COMMIT_HASH"
+
+      - name: Measure binary size
+        working-directory: opensmt
+        run: |
+          if [ -f "./build/bin/opensmt" ]; then
+            BINARY_SIZE=$(du -h ./build/bin/opensmt | cut -f1)
+            BINARY_SIZE_BYTES=$(stat -f%z ./build/bin/opensmt 2>/dev/null || stat -c%s ./build/bin/opensmt 2>/dev/null)
+            echo "Binary size: $BINARY_SIZE ($BINARY_SIZE_BYTES bytes)"
+            echo "binary_size=$BINARY_SIZE" >> $GITHUB_OUTPUT
+            echo "binary_size_bytes=$BINARY_SIZE_BYTES" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: Binary not found at ./build/bin/opensmt"
+            exit 1
+          fi
+
+      - name: Collect build artifacts (headers, binary, compile_commands)
+        run: |
+          bash "${{ github.workspace }}/scripts/opensmt/collect_build_artifacts.sh" opensmt/build .artifacts
+
+      - name: Compress collected artifacts
+        run: |
+          cd .artifacts
+          tar -czf ../opensmt/build/artifacts.tar.gz .
+          cd ..
+          COMPRESSED_SIZE=$(du -h opensmt/build/artifacts.tar.gz | cut -f1)
+          echo "Compressed size: $COMPRESSED_SIZE"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          path: .cache
-          key: solver-opensmt-${{ steps.check-upstream.outputs.sha }}
-      
-      - name: Build OpenSMT
-        if: steps.check-upstream.outputs.build_needed == 'true'
-        run: ./scripts/opensmt/build.sh
-      
-      - name: Skip build (up to date)
-        if: steps.check-upstream.outputs.build_needed == 'false'
-        run: echo "✅ OpenSMT is up to date - skipping build"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check if commit is still in build queue
+        id: check-queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          CHECK_OUTPUT=$(python scripts/scheduling/s3_state.py opensmt build-queue check "$COMMIT_HASH" 2>&1)
+          IN_QUEUE=$(echo "$CHECK_OUTPUT" | grep -E "^(true|false)$" | tail -1)
+          if [ "$IN_QUEUE" = "true" ]; then
+            echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
+            echo "should_upload=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  Commit $COMMIT_HASH was removed from queue, discarding build"
+            echo "DEBUG: Check output: $CHECK_OUTPUT"
+            echo "should_upload=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload production binary to S3
+        if: steps.check-queue.outputs.should_upload == 'true'
+        run: |
+          aws s3api put-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key solvers/opensmt/builds/v2/production/${{ steps.get-commit.outputs.commit_hash }}.tar.gz \
+            --body opensmt/build/artifacts.tar.gz \
+            --tagging "Type=Production"
+          echo "✅ Uploaded production binary to S3"
+
+      - name: Discard build (not in queue)
+        if: steps.check-queue.outputs.should_upload == 'false'
+        run: |
+          echo "⚠️  Build discarded - commit was removed from queue"
+
+  build-static-coverage:
+    needs: check-build-queue
+    if: needs.check-build-queue.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Clean any previous build
+        run: |
+          if [ -d "opensmt/build" ]; then
+            rm -rf opensmt/build
+            echo "Cleaned previous build directory"
+          fi
+
+      - name: Prepare OpenSMT for commit
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          echo "🔨 Building commit: $COMMIT_HASH"
+          if [ -d "opensmt" ]; then
+            rm -rf opensmt
+          fi
+          git clone https://github.com/usi-verification-and-security/OpenSMT.git opensmt
+          cd opensmt
+          git checkout "$COMMIT_HASH"
+          echo "Checked out commit: $(git rev-parse HEAD)"
+          cd ..
+
+      - name: Build OpenSMT static binary with coverage
+        run: bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static --coverage
+
+      - name: Get commit hash
+        id: get-commit
+        working-directory: opensmt
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "OpenSMT commit hash: $COMMIT_HASH"
+
+      - name: Measure binary size
+        working-directory: opensmt
+        run: |
+          if [ -f "./build/bin/opensmt" ]; then
+            BINARY_SIZE=$(du -h ./build/bin/opensmt | cut -f1)
+            BINARY_SIZE_BYTES=$(stat -f%z ./build/bin/opensmt 2>/dev/null || stat -c%s ./build/bin/opensmt 2>/dev/null)
+            echo "Binary size: $BINARY_SIZE ($BINARY_SIZE_BYTES bytes)"
+            echo "binary_size=$BINARY_SIZE" >> $GITHUB_OUTPUT
+            echo "binary_size_bytes=$BINARY_SIZE_BYTES" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: Binary not found at ./build/bin/opensmt"
+            exit 1
+          fi
+
+      - name: Collect build artifacts (headers, binary, compile_commands)
+        run: |
+          bash "${{ github.workspace }}/scripts/opensmt/collect_build_artifacts.sh" opensmt/build .artifacts
+
+      - name: Compress collected artifacts
+        run: |
+          cd .artifacts
+          tar -czf ../opensmt/build/artifacts.tar.gz .
+          cd ..
+          COMPRESSED_SIZE=$(du -h opensmt/build/artifacts.tar.gz | cut -f1)
+          echo "Compressed size: $COMPRESSED_SIZE"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check if commit is still in build queue (coverage)
+        id: check-queue-coverage
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          IN_QUEUE=$(python scripts/scheduling/s3_state.py opensmt build-queue check "$COMMIT_HASH" 2>&1 | tail -1)
+          if [ "$IN_QUEUE" = "true" ]; then
+            echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
+            echo "should_upload=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  Commit $COMMIT_HASH was removed from queue, discarding build"
+            echo "should_upload=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload coverage binary to S3
+        if: steps.check-queue-coverage.outputs.should_upload == 'true'
+        run: |
+          aws s3api put-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key solvers/opensmt/builds/v2/coverage/${{ steps.get-commit.outputs.commit_hash }}.tar.gz \
+            --body opensmt/build/artifacts.tar.gz \
+            --tagging "Type=Coverage"
+          echo "✅ Uploaded coverage binary to S3"
+
+      - name: Discard build (not in queue)
+        if: steps.check-queue-coverage.outputs.should_upload == 'false'
+        run: |
+          echo "⚠️  Build discarded - commit was removed from queue"
+
+  remove-from-queue:
+    needs: [check-build-queue, build-static, build-static-coverage]
+    if: |
+      needs.build-static.result == 'success' &&
+      needs.build-static-coverage.result == 'success' &&
+      needs.check-build-queue.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Remove commit from build queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          python scripts/scheduling/s3_state.py opensmt build-queue remove "$COMMIT_HASH"
+          echo "✅ Removed $COMMIT_HASH from build queue (both binaries uploaded)"
+
+  remove-from-queue-on-failure:
+    needs: [check-build-queue, build-static, build-static-coverage]
+    if: |
+      always() &&
+      needs.check-build-queue.outputs.build_needed == 'true' &&
+      (needs.build-static.result == 'failure' || needs.build-static-coverage.result == 'failure')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Remove failed commit from build queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          echo "❌ Build failed for commit $COMMIT_HASH, removing from queue to prevent infinite retries"
+          python scripts/scheduling/s3_state.py opensmt build-queue remove "$COMMIT_HASH"
+          echo "✅ Removed failed commit $COMMIT_HASH from build queue"

@@ -17,7 +17,7 @@ Compare FMFuzz (directed fuzzing towards committed changes) against a baseline (
 ### Constraints
 - 20 jobs max in parallel
 - 256 jobs max per workflow
-- 6 hours max per job
+- 1 hour max per job
 - Both z3 and cvc5 (execute separately)
 - Storage: `evaluation/rq2/{solver}/`
 
@@ -118,7 +118,7 @@ Compare FMFuzz (directed fuzzing towards committed changes) against a baseline (
 
 3. **Build in parallel** (up to 20 jobs)
    - Each job builds both binaries for one commit
-   - Timeout: 6 hours per job
+   - Timeout: 1 hour per job
 
 ### Timing
 - Production binary: ~30-60 minutes per commit
@@ -136,11 +136,9 @@ Compare FMFuzz (directed fuzzing towards committed changes) against a baseline (
 ### Process
 1. **Generate combined matrix** (commit × chunk)
    - Downloads one coverage binary to discover tests
-   - Discovers all tests and calculates chunks:
-     - Z3: ~4 chunks (target: ~1 hour per chunk)
-     - CVC5: ~6 chunks (target: ~3 hours per chunk)
+   - Discovers all tests and calculates chunks to fit the 1 hour budget
    - Creates matrix of (commit, chunk) pairs
-   - Example: 50 commits × 4 chunks = 200 jobs for Z3
+   - Example: 50 commits × chunk count chosen by the generator = parallel jobs per solver
 
 2. **Run coverage analysis** (parallel matrix job)
    - For each (commit, chunk) pair:
@@ -161,8 +159,8 @@ Compare FMFuzz (directed fuzzing towards committed changes) against a baseline (
 
 ### Chunking Strategy
 - **Why chunking?** Coverage mapping is time-intensive:
-  - Z3: 4 chunks × ~1 hour = ~1 hour total (parallel)
-  - CVC5: 6 chunks × ~3 hours = ~3 hours total (parallel)
+  - Z3: chunks are sized to keep each job within the 1 hour budget
+  - CVC5: chunks are sized to keep each job within the 1 hour budget
 - **How it works:**
   - Tests are split into ranges (e.g., tests 1-250, 251-500, etc.)
   - Each chunk runs independently
@@ -175,14 +173,7 @@ Compare FMFuzz (directed fuzzing towards committed changes) against a baseline (
 - `max_commits`: Maximum commits to process (e.g., "5" for testing)
 
 ### Timing
-- **Z3**: 50 commits × 4 chunks = 200 jobs
-  - 200 jobs ÷ 20 parallel = 10 batches
-  - Each batch: ~1 hour
-  - Total: ~10 hours wall-clock time
-- **CVC5**: 50 commits × 6 chunks = 300 jobs
-  - 300 jobs ÷ 20 parallel = 15 batches
-  - Each batch: ~3 hours
-  - Total: ~45 hours wall-clock time
+- **Z3/CVC5**: job counts are determined by the generator so each coverage-analysis job fits inside the 1 hour budget
 
 ## Storage Structure
 

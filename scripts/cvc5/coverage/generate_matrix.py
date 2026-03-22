@@ -9,6 +9,9 @@ from coverage_mapper import CoverageMapper
 def calculate_jobs(total_tests: int, target_jobs: int, max_job_time_minutes: int, 
                    buffer_minutes: int, avg_test_time_seconds: float) -> tuple[int, int]:
     """Calculate optimal number of jobs and tests per job."""
+    if max_job_time_minutes <= buffer_minutes:
+        raise ValueError("max_job_time_minutes must be greater than buffer_minutes")
+
     available_time_seconds = (max_job_time_minutes - buffer_minutes) * 60
     max_tests_per_job = int(available_time_seconds / avg_test_time_seconds)
     min_jobs = (total_tests + max_tests_per_job - 1) // max_tests_per_job
@@ -41,8 +44,8 @@ def generate_job_name(job_id: int) -> str:
     return f"regress{group}{chr(ord('a') + letter_idx)}"
 
 
-def generate_matrix(build_dir: str = "build", max_job_time_minutes: int = 360, 
-                    buffer_minutes: int = 60, avg_test_time_seconds: float = 18.6):
+def generate_matrix(build_dir: str = "build", max_job_time_minutes: int = 60,
+                    buffer_minutes: int = 10, avg_test_time_seconds: float = 18.6):
     """Generate dynamic matrix for coverage mapping jobs."""
     # ctest --show-only already excludes disabled tests
     mapper = CoverageMapper(build_dir=build_dir)
@@ -86,8 +89,8 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='Generate dynamic matrix for CVC5 coverage mapping')
     parser.add_argument('--build-dir', default='build', help='Path to build directory')
-    parser.add_argument('--max-job-time', type=int, default=360, help='Maximum time per job in minutes')
-    parser.add_argument('--buffer', type=int, default=60, help='Buffer time for setup/teardown in minutes')
+    parser.add_argument('--max-job-time', type=int, default=60, help='Maximum time per job in minutes')
+    parser.add_argument('--buffer', type=int, default=10, help='Buffer time for setup/teardown in minutes')
     parser.add_argument('--avg-test-time', type=float, default=18.6, help='Average test execution time in seconds')
     parser.add_argument('--output', default='matrix.json', help='Output JSON file')
     

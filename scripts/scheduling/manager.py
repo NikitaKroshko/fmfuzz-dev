@@ -9,12 +9,7 @@ from typing import List, Optional
 scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, scripts_dir)
 
-from scheduling.s3_state import (
-    SUPPORTED_SOLVERS,
-    DEFAULT_STATE_VERSION,
-    S3StateError,
-    get_state_manager,
-)
+from scheduling.s3_state import get_state_manager, S3StateError, DEFAULT_STATE_VERSION
 from scheduling.detect_cpp_changes import detect_cpp_changes
 
 try:
@@ -129,7 +124,7 @@ def verify_commit_is_newer(repo_url: str, newer_commit: str, older_commit: str, 
             response.raise_for_status()
             data = response.json()
             
-            commit_date_str = data.get('commit', {}).get('author', {}).get('date')
+            commit_date_str = data.get('commit', {}).get('committer', {}).get('date')
             if commit_date_str:
                 commit_date = datetime.fromisoformat(commit_date_str.replace('Z', '+00:00'))
                 print(f" date={commit_date.isoformat()}")
@@ -439,7 +434,7 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Manager job for fuzzing system')
-    parser.add_argument('solver', choices=SUPPORTED_SOLVERS, help='Solver name')
+    parser.add_argument('solver', choices=['z3', 'cvc5', 'opensmt'], help='Solver name')
     parser.add_argument('repo_url', help='Repository URL')
     parser.add_argument('--token', help='GitHub token', default=os.getenv('GITHUB_TOKEN'))
     

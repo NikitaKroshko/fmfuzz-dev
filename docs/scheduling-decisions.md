@@ -19,9 +19,9 @@
 - **Rationale**: Runs 5 minutes after manager to allow queue updates, staggered to avoid resource contention
 
 ### Fuzzer
-- **Schedule**: Every 6 hours starting at 00:45 (`45 0,6,12,18 * * *`)
-- **Duration**: 6 hours per run
-- **Rationale**: Runs at :45 to give builds time to complete, 6-hour intervals provide continuous coverage
+- **Schedule**: Every 5 hours starting at 00:45 (`45 0,5,10,15,20 * * *`)
+- **Duration**: 1 hour per run
+- **Rationale**: Runs at :45 to give builds time to complete and keeps each scheduled fuzzing window bounded
 
 ### Coverage Mapper
 - **Schedule**: Monthly on 1st at 00:00 (`0 0 1 * *`)
@@ -134,7 +134,7 @@
 1. Check if manual commit provided → add to fuzzing schedule if yes
 2. Otherwise: call `fuzzer.py select` → get least-fuzzed commit
 3. Verify binary exists in S3
-4. If found: checkout → download coverage mapping → run fuzzing for 6 hours
+4. If found: checkout → download coverage mapping → run fuzzing for 1 hour
 5. After fuzzing: `update-fuzz-count` job calls `fuzzer.py increment`
 6. Increment fuzz count → manage schedule size if needed
 
@@ -154,4 +154,3 @@ All workflows support `workflow_dispatch` with optional commit hash input:
 - **Fuzzer**: Adds commit directly to fuzzing schedule (skips build queue)
 
 **Use case**: Testing specific commits, re-adding failed commits, prioritizing important commits
-

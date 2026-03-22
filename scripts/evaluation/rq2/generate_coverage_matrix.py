@@ -6,7 +6,7 @@ import sys
 import json
 import boto3
 import subprocess
-from pathlib import Path
+import shutil
 from botocore.exceptions import ClientError
 
 def main():
@@ -50,21 +50,10 @@ def main():
     print(f"📥 Downloading coverage binary for test discovery...", file=sys.stderr)
     os.makedirs('artifacts', exist_ok=True)
     s3_client.download_file(bucket, coverage_key, 'artifacts/artifacts.tar.gz')
-    
-    # Extract binary
+
     solver_dir = solver
     build_dir = f"{solver_dir}/build"
-    os.makedirs(build_dir, exist_ok=True)
-    
-    extract_script = f"scripts/{solver}/extract_build_artifacts.sh"
-    result = subprocess.run(
-        ['bash', extract_script, 'artifacts/artifacts.tar.gz', build_dir, 'true'],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-    print(result.stdout, file=sys.stderr)
-    
+
     # Discover tests and generate chunks
     if solver == 'z3':
         # Clone z3test if needed
@@ -75,19 +64,53 @@ def main():
         result = subprocess.run(
             ['python3', 'scripts/z3/coverage/generate_matrix.py',
              '--z3test-dir', 'z3test',
-             '--max-job-time', '300',
-             '--buffer', '60',
+             '--max-job-time', '60',
+             '--buffer', '10',
              '--output', 'matrix.json'],
             capture_output=True,
             text=True,
             check=True
         )
-    else:  # cvc5
+    elif solver == 'cvc5':
         result = subprocess.run(
             ['python3', 'scripts/cvc5/coverage/generate_matrix.py',
              '--build-dir', build_dir,
-             '--max-job-time', '300',
-             '--buffer', '60',
+             '--max-job-time', '60',
+             '--buffer', '10',
+             '--output', 'matrix.json'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+    else:  # opensmt
+        if not os.path.exists('opensmt') or not os.path.isdir('opensmt') or not os.path.exists('opensmt/.git'):
+            if os.path.exists('opensmt') and not os.path.exists('opensmt/.git'):
+                shutil.rmtree('opensmt')
+            subprocess.run(['git', 'clone', 'https://github.com/usi-verification-and-security/OpenSMT.git', 'opensmt'], check=True)
+        else:
+            subprocess.run(['git', '-C', 'opensmt', 'fetch', '--all', '--tags'], check=True)
+
+        subprocess.run(['git', '-C', 'opensmt', 'checkout', first_commit], check=True)
+
+    # Extract binary after the repository checkout so we do not overwrite the repo root
+    os.makedirs(build_dir, exist_ok=True)
+
+    extract_script = f"scripts/{solver}/extract_build_artifacts.sh"
+    result = subprocess.run(
+        ['bash', extract_script, 'artifacts/artifacts.tar.gz', build_dir, 'true'],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    print(result.stdout, file=sys.stderr)
+
+    if solver == 'opensmt':
+        # The repo checkout above is used for discovering the corpus ordering.
+        result = subprocess.run(
+            ['python3', 'scripts/opensmt/coverage/generate_matrix.py',
+             '--opensmt-dir', 'opensmt',
+             '--max-job-time', '60',
+             '--buffer', '10',
              '--output', 'matrix.json'],
             capture_output=True,
             text=True,
@@ -121,4 +144,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

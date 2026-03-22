@@ -7,8 +7,6 @@ on:
         description: 'Optional: Z3 commit hash to add to build queue'
         required: false
         type: string
-  schedule:
-    - cron: '5,35 * * * *'  # Run every 30 minutes starting at 00:05 (00:05, 00:35, 01:05, 01:35, etc.)
 
 jobs:
   check-build-queue:
