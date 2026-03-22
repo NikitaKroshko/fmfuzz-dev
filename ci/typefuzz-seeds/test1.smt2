@@ -1,0 +1,7 @@
+(set-logic QF_LIA)
+(declare-const x Int)
+(declare-const y Int)
+(assert (> x 0))
+(assert (= (+ (* 2 x) y) 7))
+(check-sat)
+(get-model)
