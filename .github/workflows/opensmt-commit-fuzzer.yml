@@ -25,6 +25,7 @@ concurrency:
 jobs:
   run-fuzzer:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
 
@@ -132,6 +133,9 @@ jobs:
           mkdir -p ../logs ../bugs
           JOB_START=$(date +%s)
           STOP_BUFFER="${{ inputs.stop_buffer_minutes || 5 }}"
+
+          trap '' PIPE
+          trap 'echo "⏰ Shutdown signal received, exiting gracefully..." >&2; exit 0' SIGTERM SIGINT
 
           set -o pipefail
           python3 "${{ github.workspace }}/scripts/opensmt/commit_fuzzer/run_commit_fuzzer.py" \
