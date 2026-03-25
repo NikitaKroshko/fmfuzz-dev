@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -7,6 +8,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from scripts.commit_harness_runner import build_cvc5_opensmt_targets
@@ -149,11 +151,22 @@ class CommitHarnessTests(unittest.TestCase):
                 "cvc5",
             ]
 
-            with patch.dict(os.environ, {"PATH": path_env}, clear=False), patch.object(sys, "argv", argv):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"PATH": path_env}, clear=False),
+                patch.object(sys, "argv", argv),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
                 exit_code = run_commit_fuzzer.main()
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((workdir / "bugs" / "open-smt-bug.smt2").exists())
+            combined_output = stdout.getvalue() + stderr.getvalue()
+            self.assertIn("Running fuzzer on 1 test(s)", combined_output)
+            self.assertIn("Workers: 1", combined_output)
+            self.assertIn("[WORKER 1] ✓ Exit code 10: Found 1 bug(s) on seed.smt2", combined_output)
 
 
 if __name__ == "__main__":

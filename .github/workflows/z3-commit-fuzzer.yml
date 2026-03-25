@@ -25,10 +25,14 @@ concurrency:
 jobs:
   run-fuzzer:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
 
     steps:
+      - name: Record job start time
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -138,7 +142,6 @@ jobs:
           TESTS_JSON: ${{ steps.build-matrix.outputs.tests_json }}
         run: |
           mkdir -p ../logs ../bugs
-          JOB_START=$(date +%s)
           STOP_BUFFER="${{ inputs.stop_buffer_minutes || 5 }}"
 
           set -o pipefail

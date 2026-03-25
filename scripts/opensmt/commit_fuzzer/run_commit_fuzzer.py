@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -19,6 +20,42 @@ from scripts.commit_harness_runner import (
     ensure_command_available,
     run_commit_harness,
 )
+
+
+def _print_startup_banner(tests: list[str], args: argparse.Namespace) -> None:
+    job_suffix = f" for job {args.job_id}" if args.job_id else ""
+    print(f"Running fuzzer on {len(tests)} test(s){job_suffix}")
+    print(f"Tests root: {args.tests_root}")
+
+    cpu_count = max(1, os.cpu_count() or 1)
+    workers = cpu_count if args.workers <= 0 else min(args.workers, cpu_count)
+
+    if args.job_start_time is not None:
+        script_start_time = time.time()
+        build_time = script_start_time - args.job_start_time
+        stop_buffer_seconds = args.stop_buffer_minutes * 60
+        remaining = max(300, int(3600 - build_time - stop_buffer_seconds))
+        print(f"Timeout: {remaining}s ({remaining // 60} minutes)")
+        print(f"[DEBUG] Job start time: {args.job_start_time} ({time.ctime(args.job_start_time)})")
+        print(f"[DEBUG] Script start time: {script_start_time} ({time.ctime(script_start_time)})")
+        print(f"[DEBUG] Build time: {build_time:.1f}s ({build_time / 60:.1f} minutes)")
+        print(f"[DEBUG] Stop buffer: {args.stop_buffer_minutes} minutes")
+        print(f"[DEBUG] Computed remaining time: {remaining}s ({remaining / 60:.1f} minutes)")
+    elif args.time_remaining is not None:
+        print(f"Timeout: {args.time_remaining}s ({args.time_remaining / 60:.1f} minutes)")
+        print(f"[DEBUG] Using provided time_remaining: {args.time_remaining}s ({args.time_remaining / 60:.1f} minutes)")
+    else:
+        print("No timeout")
+
+    print(f"Iterations per test: {args.iterations}, Modulo: {args.modulo}")
+    print(f"CPU cores: {cpu_count}")
+    print(f"Workers: {workers}")
+    print(
+        "Solvers: "
+        f"cvc5={args.cvc5_path} --check-models --check-proofs --strings-exp, "
+        f"opensmt={args.opensmt_path}"
+    )
+    print()
 
 
 def main() -> int:
@@ -107,6 +144,8 @@ def main() -> int:
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+    _print_startup_banner(tests, args)
 
     return run_commit_harness(
         tests=tests,
