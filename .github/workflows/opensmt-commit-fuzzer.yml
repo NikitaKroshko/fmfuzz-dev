@@ -140,7 +140,14 @@ jobs:
           trap 'echo "⏰ Shutdown signal received, exiting gracefully..." >&2; exit 0' SIGTERM SIGINT
 
           set -o pipefail
-          python3 "${{ github.workspace }}/scripts/opensmt/commit_fuzzer/run_commit_fuzzer.py" \
+          CVC5_BIN="$(command -v cvc5 || true)"
+          OPENSMT_BIN="$(command -v opensmt || true)"
+          if [ -z "$CVC5_BIN" ] || [ -z "$OPENSMT_BIN" ]; then
+            echo "Error: required solver binaries not found in PATH" >&2
+            exit 1
+          fi
+
+          python3 "${{ github.workspace }}/scripts/commit_harness_orchestrator.py" \
             --tests-json "$TESTS_JSON" \
             --job-id 'opensmt-local' \
             --tests-root 'test/regression' \
@@ -148,8 +155,9 @@ jobs:
             --stop-buffer-minutes "$STOP_BUFFER" \
             --iterations 250 \
             --workers 4 \
-            --opensmt-path opensmt \
-            --cvc5-path cvc5 \
+            --bugs-folder bugs \
+            --targets "$CVC5_BIN --check-models --check-proofs --strings-exp" "$OPENSMT_BIN" \
+            --harness '["typefuzz","-i","{iterations}","-m","{modulo}","--timeout","120","--bugs","{bugs_dir}","--scratch","{scratch_dir}","--logfolder","{logs}","{target_clis}","{test_path}"]' \
             |& tee "../logs/opensmt-fuzzer.log"
 
       - name: Upload local matrix
