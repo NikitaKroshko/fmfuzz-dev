@@ -19,7 +19,8 @@ on:
     - cron: '45 0,5,10,15,20 * * *'
 
 concurrency:
-  group: ${{ github.workflow }}
+  # Keep scheduled and manual runs from canceling each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
