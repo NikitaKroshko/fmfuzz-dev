@@ -115,8 +115,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--opensmt-path",
-        default="opensmt",
-        help="Path to the OpenSMT binary (default: opensmt)",
+        default="./build/bin/opensmt",
+        help="Path to the OpenSMT binary (default: ./build/bin/opensmt)",
     )
     parser.add_argument(
         "--cvc5-path",

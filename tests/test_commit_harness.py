@@ -83,6 +83,8 @@ class CommitHarnessTests(unittest.TestCase):
 
             bin_dir = workdir / "bin"
             bin_dir.mkdir()
+            opensmt_build_bin = workdir / "build" / "bin"
+            opensmt_build_bin.mkdir(parents=True)
 
             self._write_executable(
                 bin_dir / "typefuzz",
@@ -122,7 +124,7 @@ class CommitHarnessTests(unittest.TestCase):
                 """,
             )
             self._write_executable(
-                bin_dir / "opensmt",
+                opensmt_build_bin / "opensmt",
                 """\
                 #!/bin/sh
                 exit 0
@@ -145,8 +147,6 @@ class CommitHarnessTests(unittest.TestCase):
                 "1",
                 "--bugs-folder",
                 "bugs",
-                "--opensmt-path",
-                "opensmt",
                 "--cvc5-path",
                 "cvc5",
             ]

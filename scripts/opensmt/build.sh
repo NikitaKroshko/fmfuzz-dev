@@ -61,13 +61,21 @@ if [ "$ENABLE_COVERAGE" = "true" ]; then
   CMAKE_BUILD_TYPE="Debug"
   CMAKE_C_FLAGS="-O0 -g --coverage"
   CMAKE_CXX_FLAGS="-O0 -g --coverage"
-  CMAKE_EXE_LINKER_FLAGS="-static --coverage"
+  if [ "$ENABLE_STATIC" = "true" ]; then
+    CMAKE_EXE_LINKER_FLAGS="-static"
+  else
+    CMAKE_EXE_LINKER_FLAGS=""
+  fi
   echo "🔍 Coverage instrumentation enabled"
 else
   CMAKE_BUILD_TYPE="Release"
   CMAKE_C_FLAGS=""
   CMAKE_CXX_FLAGS=""
-  CMAKE_EXE_LINKER_FLAGS="-static"
+  if [ "$ENABLE_STATIC" = "true" ]; then
+    CMAKE_EXE_LINKER_FLAGS="-static"
+  else
+    CMAKE_EXE_LINKER_FLAGS=""
+  fi
 fi
 
 export PARALLEL="OFF"
@@ -83,14 +91,20 @@ cmake_args=(
   "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
   "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
   "-DENABLE_LINE_EDITING:BOOL=${ENABLE_LINE_EDITING}"
-  "-DMAXIMALLY_STATIC_BINARY=YES"
   "-DPARALLEL:BOOL=${PARALLEL}"
-  "-DCMAKE_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
 )
 
 if [ -n "$CMAKE_C_FLAGS" ]; then
   cmake_args+=("-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}")
   cmake_args+=("-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}")
+fi
+
+if [ "$ENABLE_STATIC" = "true" ]; then
+  cmake_args+=("-DMAXIMALLY_STATIC_BINARY=YES")
+fi
+
+if [ -n "$CMAKE_EXE_LINKER_FLAGS" ]; then
+  cmake_args+=("-DCMAKE_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}")
 fi
 
 cmake "${cmake_args[@]}" ..
