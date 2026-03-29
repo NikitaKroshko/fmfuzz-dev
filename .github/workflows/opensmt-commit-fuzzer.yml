@@ -141,7 +141,7 @@ jobs:
           trap 'echo "⏰ Shutdown signal received, stopping workers..." >&2; exit 0' SIGTERM SIGINT
 
           set -o pipefail
-          python3 "${{ github.workspace }}/scripts/opensmt/commit_fuzzer/run_commit_fuzzer.py" \
+          python3 "${{ github.workspace }}/scripts/opensmt/commit_fuzzer/simple_commit_fuzzer.py" \
             --tests-json "$TESTS_JSON" \
             --job-id 'opensmt-local' \
             --tests-root 'test/regression' \

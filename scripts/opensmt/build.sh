@@ -5,19 +5,27 @@
 set -e
 
 ENABLE_COVERAGE=false
+ENABLE_STATIC=false
 for arg in "$@"; do
   case "$arg" in
     --coverage)
       ENABLE_COVERAGE=true
       ;;
     --static)
-      # Kept for parity with the Z3/CVC5 helpers.
+      ENABLE_STATIC=true
       ;;
     *)
       echo "Warning: ignoring unknown argument: $arg"
       ;;
   esac
 done
+
+if [ "$ENABLE_STATIC" = "true" ]; then
+  echo "📦 Static binary build will be enabled"
+fi
+if [ "$ENABLE_COVERAGE" = "true" ]; then
+  echo "🔍 Coverage instrumentation will be enabled"
+fi
 
 echo "🔧 Installing basic tools..."
 sudo apt-get update
