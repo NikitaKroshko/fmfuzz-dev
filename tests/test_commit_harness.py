@@ -11,8 +11,9 @@ from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
-from scripts.commit_harness_runner import build_cvc5_opensmt_targets
+from scripts.commit_harness_runner import build_opensmt_targets
 from scripts.local_commit_fuzzer_matrix import discover_opensmt_tests
+from scripts.opensmt.commit_fuzzer import prepare_commit_fuzzer, simple_commit_fuzzer
 from scripts.opensmt.commit_fuzzer import run_commit_fuzzer
 
 
@@ -21,9 +22,9 @@ class CommitHarnessTests(unittest.TestCase):
         path.write_text(textwrap.dedent(content), encoding="utf-8")
         path.chmod(0o755)
 
-    def test_build_cvc5_opensmt_targets(self) -> None:
+    def test_build_opensmt_targets(self) -> None:
         self.assertEqual(
-            build_cvc5_opensmt_targets("cvc5", "opensmt"),
+            build_opensmt_targets("cvc5", "opensmt"),
             [
                 "cvc5 --check-models --check-proofs --strings-exp",
                 "opensmt",
@@ -141,6 +142,8 @@ class CommitHarnessTests(unittest.TestCase):
                 "test/regression",
                 "--workers",
                 "1",
+                "--time-remaining",
+                "3",
                 "--iterations",
                 "1",
                 "--modulo",
@@ -164,9 +167,161 @@ class CommitHarnessTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((workdir / "bugs" / "open-smt-bug.smt2").exists())
             combined_output = stdout.getvalue() + stderr.getvalue()
+            self.assertIn("[WORKER 1] ✓ Exit code 10: Found 1 bug(s) on seed.smt2", combined_output)
+
+    def test_opensmt_simple_commit_fuzzer_runs_to_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            old_cwd = Path.cwd()
+            self.addCleanup(os.chdir, old_cwd)
+            os.chdir(workdir)
+
+            tests_root = workdir / "test" / "regression"
+            tests_root.mkdir(parents=True)
+            (tests_root / "seed.smt2").write_text("(check-sat)\n", encoding="utf-8")
+
+            bin_dir = workdir / "bin"
+            bin_dir.mkdir()
+            opensmt_build_bin = workdir / "build" / "bin"
+            opensmt_build_bin.mkdir(parents=True)
+
+            self._write_executable(
+                bin_dir / "typefuzz",
+                """\
+                #!/usr/bin/env python3
+                import sys
+                from pathlib import Path
+
+                def main() -> int:
+                    args = sys.argv[1:]
+                    bugs_dir = None
+                    for index, value in enumerate(args):
+                        if value == "--bugs" and index + 1 < len(args):
+                            bugs_dir = Path(args[index + 1])
+                            break
+                    if bugs_dir is None:
+                        return 2
+
+                    bugs_dir.mkdir(parents=True, exist_ok=True)
+                    sentinel = bugs_dir / ".seen"
+                    if sentinel.exists():
+                        return 3
+
+                    sentinel.write_text("seen\\n", encoding="utf-8")
+                    (bugs_dir / "open-smt-bug.smt2").write_text("(check-sat)\\n", encoding="utf-8")
+                    return 10
+
+                if __name__ == "__main__":
+                    raise SystemExit(main())
+                """,
+            )
+            self._write_executable(
+                bin_dir / "cvc5",
+                """\
+                #!/bin/sh
+                exit 0
+                """,
+            )
+            self._write_executable(
+                opensmt_build_bin / "opensmt",
+                """\
+                #!/bin/sh
+                exit 0
+                """,
+            )
+
+            path_env = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+            tests_json = json.dumps(["seed.smt2"])
+            argv = [
+                "simple_commit_fuzzer.py",
+                "--tests-json",
+                tests_json,
+                "--tests-root",
+                "test/regression",
+                "--workers",
+                "1",
+                "--iterations",
+                "1",
+                "--modulo",
+                "1",
+                "--bugs-folder",
+                "bugs",
+                "--opensmt-path",
+                "./build/bin/opensmt",
+                "--cvc5-path",
+                "cvc5",
+            ]
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"PATH": path_env}, clear=False),
+                patch.object(sys, "argv", argv),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = simple_commit_fuzzer.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((workdir / "bugs" / "open-smt-bug.smt2").exists())
+            combined_output = stdout.getvalue() + stderr.getvalue()
             self.assertIn("Running fuzzer on 1 test(s)", combined_output)
             self.assertIn("Workers: 1", combined_output)
-            self.assertIn("[WORKER 1] ✓ Exit code 10: Found 1 bug(s) on seed.smt2", combined_output)
+            self.assertIn("Found 1 bug(s):", combined_output)
+            self.assertIn("Bug #1: bugs/open-smt-bug.smt2", combined_output)
+
+    def test_opensmt_prepare_commit_fuzzer_generates_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            old_cwd = Path.cwd()
+            self.addCleanup(os.chdir, old_cwd)
+            os.chdir(workdir)
+
+            tests_root = workdir / "test" / "regression"
+            (tests_root / "nested").mkdir(parents=True)
+            (tests_root / "a.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            (tests_root / "nested" / "b.smt").write_text("(check-sat)\n", encoding="utf-8")
+
+            coverage_json = workdir / "coverage_mapping.json"
+            coverage_json.write_text("{}\n", encoding="utf-8")
+            matrix_path = workdir / "matrix.json"
+
+            argv = [
+                "prepare_commit_fuzzer.py",
+                "HEAD",
+                "--coverage-json",
+                str(coverage_json),
+                "--output-matrix",
+                str(matrix_path),
+                "--tests-per-job",
+                "1",
+                "--max-jobs",
+                "2",
+            ]
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                exit_code = prepare_commit_fuzzer.main()
+
+            self.assertEqual(exit_code, 0)
+            matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+            self.assertEqual(matrix["total_tests"], 2)
+            self.assertEqual(matrix["total_jobs"], 2)
+            self.assertEqual(matrix["tests_per_job"], 1)
+            self.assertEqual(
+                matrix["matrix"]["include"],
+                [
+                    {"job_id": 1, "job_name": "opensmt-job-1", "tests": ["a.smt2"]},
+                    {"job_id": 2, "job_name": "opensmt-job-2", "tests": ["nested/b.smt"]},
+                ],
+            )
+            combined_output = stdout.getvalue() + stderr.getvalue()
+            self.assertIn("Changed functions: 2; with coverage: 2; without: 0;", combined_output)
 
 
 if __name__ == "__main__":

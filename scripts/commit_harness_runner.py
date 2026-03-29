@@ -66,12 +66,17 @@ def build_z3_cvc5_targets(z3_path: str, cvc5_path: str) -> List[str]:
     ]
 
 
-def build_cvc5_opensmt_targets(cvc5_path: str, opensmt_path: str) -> List[str]:
+def build_opensmt_targets(cvc5_path: str, opensmt_path: str) -> List[str]:
     """Build the paired CVC5/OpenSMT command strings."""
     return [
         build_command(cvc5_path, CVC5_FLAGS),
         build_command(opensmt_path, ()),
     ]
+
+
+def build_cvc5_opensmt_targets(cvc5_path: str, opensmt_path: str) -> List[str]:
+    """Backward-compatible alias for the OpenSMT target builder."""
+    return build_opensmt_targets(cvc5_path, opensmt_path)
 
 
 def parse_tests_json(tests_json: str | Sequence[str]) -> List[str]:
