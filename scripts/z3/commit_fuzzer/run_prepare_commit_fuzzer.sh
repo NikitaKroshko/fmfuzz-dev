@@ -124,9 +124,6 @@ fi
 echo "=========================================="
 echo "Z3 Commit Coverage Analysis"
 echo "=========================================="
-echo "Analyzing last $COMMITS_TO_ANALYZE commits"
-echo "Skip coverage enforcement: $SKIP_COVERAGE_ENFORCEMENT (threshold=${MIN_OVERALL_COVERAGE}%)"
-echo ""
 
 # Check if we're in a git repository
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -154,16 +151,29 @@ fi
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
 
-# Use HEAD commit if Z3_COMMIT_HASH is not set, otherwise use the specified commit
+# Use the provided override if set, otherwise collect the requested number of recent commits.
 if [ -n "$Z3_COMMIT_HASH" ]; then
     echo "Using provided commit hash: $Z3_COMMIT_HASH"
     COMMITS=("$Z3_COMMIT_HASH")
 else
-    # Use HEAD commit (current checked out commit)
-    HEAD_COMMIT=$(git rev-parse HEAD)
-    echo "Using HEAD commit: $HEAD_COMMIT"
-    COMMITS=("$HEAD_COMMIT")
+    COMMITS=()
+    while IFS= read -r commit; do
+        COMMITS+=("$commit")
+    done < <(git log --format=%H -n "$COMMITS_TO_ANALYZE")
+
+    if [ ${#COMMITS[@]} -eq 0 ]; then
+        echo "Error: No commits found in git history" >&2
+        exit 1
+    fi
+
+    echo "Using last ${#COMMITS[@]} commit(s) from git history"
 fi
+
+COMMITS_TO_ANALYZE=${#COMMITS[@]}
+
+echo "Analyzing last $COMMITS_TO_ANALYZE commits"
+echo "Skip coverage enforcement: $SKIP_COVERAGE_ENFORCEMENT (threshold=${MIN_OVERALL_COVERAGE}%)"
+echo ""
 
 echo "Found commits that changed src/ files:"
 echo "${COMMITS[@]}" | tr ' ' '\n' | nl -w1 -s'. '
@@ -223,9 +233,9 @@ for commit in "${COMMITS[@]}"; do
     # Parse summary line if present
     LINE=$(grep -E "Changed functions: [0-9]+; with coverage: [0-9]+; without: [0-9]+;" "$TMP_OUT" | tail -n 1 || true)
     if [ -n "$LINE" ]; then
-        CF=$(echo "$LINE" | sed -n 's/.*Changed functions: \([0-9]\+\);.*/\1/p')
-        WC=$(echo "$LINE" | sed -n 's/.*with coverage: \([0-9]\+\);.*/\1/p')
-        WO=$(echo "$LINE" | sed -n 's/.*without: \([0-9]\+\);.*/\1/p')
+        CF=$(echo "$LINE" | sed -n 's/.*Changed functions: \([0-9][0-9]*\);.*/\1/p')
+        WC=$(echo "$LINE" | sed -n 's/.*with coverage: \([0-9][0-9]*\);.*/\1/p')
+        WO=$(echo "$LINE" | sed -n 's/.*without: \([0-9][0-9]*\);.*/\1/p')
         TOTAL_FUNCS=$((TOTAL_FUNCS + CF))
         TOTAL_WITH=$((TOTAL_WITH + WC))
         TOTAL_WITHOUT=$((TOTAL_WITHOUT + WO))
@@ -258,4 +268,3 @@ if [ "$SKIP_COVERAGE_ENFORCEMENT" != "true" ]; then
     exit 2
   fi
 fi
-

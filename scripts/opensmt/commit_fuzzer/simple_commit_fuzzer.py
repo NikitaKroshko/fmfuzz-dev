@@ -105,11 +105,11 @@ class SimpleCommitFuzzer:
         self.resource_status = multiprocessing.Value("i", 0)
         self.resource_paused = multiprocessing.Value("b", False)
         self.stats = {
-            "tests_processed": 0,
-            "bugs_found": 0,
-            "tests_removed_unsupported": 0,
-            "tests_removed_timeout": 0,
-            "tests_requeued": 0,
+            "tests_processed": multiprocessing.Value("i", 0),
+            "bugs_found": multiprocessing.Value("i", 0),
+            "tests_removed_unsupported": multiprocessing.Value("i", 0),
+            "tests_removed_timeout": multiprocessing.Value("i", 0),
+            "tests_requeued": multiprocessing.Value("i", 0),
         }
 
     def _command_exists(self, command: Path) -> bool:
@@ -120,6 +120,14 @@ class SimpleCommitFuzzer:
             raise ValueError(f"opensmt not found at: {self.opensmt_path}")
         if not self._command_exists(self.cvc5_path):
             raise ValueError(f"cvc5 not found at: {self.cvc5_path}")
+
+    def _increment_stat(self, key: str, amount: int = 1) -> None:
+        counter = self.stats[key]
+        with counter.get_lock():
+            counter.value += amount
+
+    def _get_stat(self, key: str) -> int:
+        return self.stats[key].value
 
     def _compute_time_remaining(self, job_start_time: float, stop_buffer_minutes: int) -> int:
         github_timeout = 3600
@@ -146,6 +154,14 @@ class SimpleCommitFuzzer:
         if not folder.exists():
             return []
         return list(folder.glob("*.smt2")) + list(folder.glob("*.smt"))
+
+    def _move_bug_file_to_main_bugs(self, bug_file: Path) -> None:
+        dest = self.bugs_folder / bug_file.name
+        if dest.exists():
+            timestamp = int(time.time())
+            dest = self.bugs_folder / f"{bug_file.stem}_{timestamp}{bug_file.suffix}"
+        shutil.move(str(bug_file), str(dest))
+        self._increment_stat("bugs_found")
 
     def _get_solver_clis(self) -> str:
         return ";".join(
@@ -304,11 +320,11 @@ class SimpleCommitFuzzer:
             print(f"      total: {info['total_size_mb']:.2f} MB disk space", file=sys.stderr)
 
         print("\nSTATISTICS:", file=sys.stderr)
-        print(f"  Tests processed: {self.stats.get('tests_processed', 0)}", file=sys.stderr)
-        print(f"  Bugs found: {self.stats.get('bugs_found', 0)}", file=sys.stderr)
-        print(f"  Tests requeued (bugs found): {self.stats.get('tests_requeued', 0)}", file=sys.stderr)
-        print(f"  Tests removed (unsupported): {self.stats.get('tests_removed_unsupported', 0)}", file=sys.stderr)
-        print(f"  Tests removed (timeout): {self.stats.get('tests_removed_timeout', 0)}", file=sys.stderr)
+        print(f"  Tests processed: {self._get_stat('tests_processed')}", file=sys.stderr)
+        print(f"  Bugs found: {self._get_stat('bugs_found')}", file=sys.stderr)
+        print(f"  Tests requeued: {self._get_stat('tests_requeued')}", file=sys.stderr)
+        print(f"  Tests removed (unsupported): {self._get_stat('tests_removed_unsupported')}", file=sys.stderr)
+        print(f"  Tests removed (timeout): {self._get_stat('tests_removed_timeout')}", file=sys.stderr)
 
         print("\n" + "=" * 60, file=sys.stderr)
         print("Stopping fuzzer to preserve found bugs...", file=sys.stderr)
@@ -513,12 +529,7 @@ class SimpleCommitFuzzer:
                 with self.bugs_lock:
                     for bug_file in bug_files:
                         try:
-                            dest = self.bugs_folder / bug_file.name
-                            if dest.exists():
-                                timestamp = int(time.time())
-                                dest = self.bugs_folder / f"{bug_file.stem}_{timestamp}{bug_file.suffix}"
-                            shutil.move(str(bug_file), str(dest))
-                            self.stats["bugs_found"] += 1
+                            self._move_bug_file_to_main_bugs(bug_file)
                         except Exception as exc:
                             print(f"[WORKER {worker_id}] Warning: Failed to move bug file {bug_file}: {exc}", file=sys.stderr)
             else:
@@ -527,12 +538,12 @@ class SimpleCommitFuzzer:
 
         if exit_code == self.EXIT_CODE_UNSUPPORTED:
             print(f"[WORKER {worker_id}] ⚠ Exit code 3: {test_name} (unsupported operation - removing)")
-            self.stats["tests_removed_unsupported"] += 1
+            self._increment_stat("tests_removed_unsupported")
             return "remove"
 
         if exit_code == 124:
             print(f"[WORKER {worker_id}] ⚠ Exit code 124: {test_name} (timeout - removing)")
-            self.stats["tests_removed_timeout"] += 1
+            self._increment_stat("tests_removed_timeout")
             return "remove"
 
         if exit_code == self.EXIT_CODE_SUCCESS:
@@ -590,11 +601,11 @@ class SimpleCommitFuzzer:
                 if action == "requeue":
                     try:
                         self.test_queue.put(test_name)
-                        self.stats["tests_requeued"] += 1
+                        self._increment_stat("tests_requeued")
                     except Exception:
                         pass
 
-                self.stats["tests_processed"] += 1
+                self._increment_stat("tests_processed")
             except Exception as exc:
                 print(f"[WORKER {worker_id}] Error in worker: {exc}", file=sys.stderr)
                 continue
@@ -606,11 +617,7 @@ class SimpleCommitFuzzer:
             worker_bugs = self.bugs_folder / f"worker_{worker_id}"
             for bug_file in self._collect_bug_files(worker_bugs):
                 try:
-                    dest = self.bugs_folder / bug_file.name
-                    if dest.exists():
-                        timestamp = int(time.time())
-                        dest = self.bugs_folder / f"{bug_file.stem}_{timestamp}{bug_file.suffix}"
-                    shutil.move(str(bug_file), str(dest))
+                    self._move_bug_file_to_main_bugs(bug_file)
                 except Exception:
                     pass
 
@@ -701,11 +708,11 @@ class SimpleCommitFuzzer:
 
             print()
             print("Statistics:")
-            print(f"  Tests processed: {self.stats.get('tests_processed', 0)}")
-            print(f"  Bugs found: {self.stats.get('bugs_found', 0)}")
-            print(f"  Tests requeued (bugs found): {self.stats.get('tests_requeued', 0)}")
-            print(f"  Tests removed (unsupported): {self.stats.get('tests_removed_unsupported', 0)}")
-            print(f"  Tests removed (timeout): {self.stats.get('tests_removed_timeout', 0)}")
+            print(f"  Tests processed: {self._get_stat('tests_processed')}")
+            print(f"  Bugs found: {self._get_stat('bugs_found')}")
+            print(f"  Tests requeued: {self._get_stat('tests_requeued')}")
+            print(f"  Tests removed (unsupported): {self._get_stat('tests_removed_unsupported')}")
+            print(f"  Tests removed (timeout): {self._get_stat('tests_removed_timeout')}")
             print("=" * 60)
 
         return 0

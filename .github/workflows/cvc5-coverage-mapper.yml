@@ -173,6 +173,13 @@ jobs:
       - name: Join coverage mappings
         run: |
           python3 scripts/cvc5/coverage/join_coverage_mappings.py
+
+      - name: Upload final coverage mapping artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-mapping
+          path: coverage_mapping.json.gz
+          retention-days: 1
       
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0

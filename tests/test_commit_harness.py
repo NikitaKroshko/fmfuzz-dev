@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import subprocess
 import textwrap
 import unittest
 from pathlib import Path
@@ -22,6 +23,56 @@ class CommitHarnessTests(unittest.TestCase):
         path.write_text(textwrap.dedent(content), encoding="utf-8")
         path.chmod(0o755)
 
+    def _git(self, cwd: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    def _import_scheduling_module(self, module_name: str):
+        import importlib
+        import types
+
+        fake_boto3 = types.ModuleType("boto3")
+        fake_boto3.client = lambda *args, **kwargs: object()  # type: ignore[assignment]
+
+        fake_botocore = types.ModuleType("botocore")
+        fake_botocore.__path__ = []  # type: ignore[attr-defined]
+        fake_botocore_exceptions = types.ModuleType("botocore.exceptions")
+        fake_git = types.ModuleType("git")
+        fake_git.NULL_TREE = object()
+
+        class BadName(Exception):
+            pass
+
+        fake_git.exc = types.SimpleNamespace(BadName=BadName)
+
+        class ClientError(Exception):
+            pass
+
+        class NoCredentialsError(Exception):
+            pass
+
+        fake_botocore_exceptions.ClientError = ClientError
+        fake_botocore_exceptions.NoCredentialsError = NoCredentialsError
+        fake_botocore.exceptions = fake_botocore_exceptions  # type: ignore[attr-defined]
+
+        with patch.dict(
+            sys.modules,
+            {
+                "boto3": fake_boto3,
+                "botocore": fake_botocore,
+                "botocore.exceptions": fake_botocore_exceptions,
+                "git": fake_git,
+            },
+            clear=False,
+        ):
+            return importlib.import_module(module_name)
+
     def test_build_opensmt_targets(self) -> None:
         self.assertEqual(
             build_opensmt_targets("cvc5", "opensmt"),
@@ -30,6 +81,207 @@ class CommitHarnessTests(unittest.TestCase):
                 "opensmt",
             ],
         )
+
+    def test_builder_returns_oldest_commit_from_fifo_queue(self) -> None:
+        builder = self._import_scheduling_module("scripts.scheduling.builder")
+
+        class FakeManager:
+            def _get_versioned_filename(self, base_filename, version=None):  # noqa: ARG002
+                return "build-queue-v2.json"
+
+            def read_state(self, filename, default=None):  # noqa: ARG002
+                return {"queue": ["oldest", "middle", "newest"]}
+
+        with patch.object(builder, "get_state_manager", return_value=FakeManager()):
+            self.assertEqual(builder.get_next_commit_to_build("cvc5"), "oldest")
+
+    def test_manager_leaves_last_checked_commit_unchanged_after_partial_failure(self) -> None:
+        scheduling_manager = self._import_scheduling_module("scripts.scheduling.manager")
+
+        class FakeStateManager:
+            def __init__(self) -> None:
+                self.build_queue = []
+                self.fuzz_queue = []
+                self.updated_commits = []
+
+            def get_last_checked_commit(self):
+                return None
+
+            def add_to_build_queue(self, commit):
+                self.build_queue.append(commit)
+
+            def add_to_fuzzing_schedule(self, commit):
+                self.fuzz_queue.append(commit)
+
+            def remove_from_fuzzing_schedule(self, commit):  # noqa: ARG002
+                return False
+
+            def get_fuzzing_schedule(self):
+                return []
+
+            def update_last_checked_commit(self, commit):
+                self.updated_commits.append(commit)
+
+        fake_manager = FakeStateManager()
+
+        def fake_detect_cpp_changes(repo_url, commit, token):  # noqa: ARG001
+            if commit == "commit-b":
+                raise RuntimeError("detection failed")
+            if commit == "commit-c":
+                return True, ["src/foo.cpp"]
+            return False, []
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch.object(scheduling_manager, "get_state_manager", return_value=fake_manager),
+            patch.object(scheduling_manager, "get_commits_from_github", return_value=["commit-a", "commit-b", "commit-c"]),
+            patch.object(scheduling_manager, "detect_cpp_changes", side_effect=fake_detect_cpp_changes),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            scheduling_manager.run_manager("cvc5", "https://github.com/example/repo.git")
+
+        self.assertEqual(fake_manager.build_queue, ["commit-c"])
+        self.assertEqual(fake_manager.fuzz_queue, ["commit-c"])
+        self.assertEqual(fake_manager.updated_commits, [])
+
+    def test_commit_wrappers_analyze_requested_history(self) -> None:
+        workspace_root = Path(__file__).resolve().parents[1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            repo_root = workdir / "repo"
+            repo_root.mkdir()
+
+            self._git(repo_root, "init")
+            self._git(repo_root, "config", "user.email", "codex@example.com")
+            self._git(repo_root, "config", "user.name", "Codex")
+
+            tracked_file = repo_root / "sample.txt"
+            for index in range(4):
+                tracked_file.write_text(f"{index}\n", encoding="utf-8")
+                self._git(repo_root, "add", "sample.txt")
+                self._git(repo_root, "commit", "-m", f"commit {index}")
+
+            expected_commits = self._git(repo_root, "log", "--format=%H", "-n", "3").splitlines()
+            coverage_file = workdir / "coverage_mapping.json"
+            coverage_file.write_text("{}\n", encoding="utf-8")
+
+            stub_script = workdir / "prepare_commit_fuzzer.py"
+            stub_script.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n\n"
+                "def main() -> int:\n"
+                "    log_path = Path(os.environ[\"INVOCATION_LOG\"])\n"
+                "    with log_path.open(\"a\", encoding=\"utf-8\") as handle:\n"
+                "        handle.write(sys.argv[1] + \"\\n\")\n"
+                "    print(\"Changed functions: 1; with coverage: 1; without: 0;\")\n"
+                "    return 0\n\n"
+                "if __name__ == \"__main__\":\n"
+                "    raise SystemExit(main())\n",
+                encoding="utf-8",
+            )
+            stub_script.chmod(0o755)
+
+            wrapper_specs = [
+                (
+                    "cvc5",
+                    workspace_root / "scripts" / "cvc5" / "commit_fuzzer" / "run_prepare_commit_fuzzer.sh",
+                    "CVC5_COMMIT_HASH",
+                ),
+                (
+                    "opensmt",
+                    workspace_root / "scripts" / "opensmt" / "commit_fuzzer" / "run_prepare_commit_fuzzer.sh",
+                    "OPENSMT_COMMIT_HASH",
+                ),
+                (
+                    "z3",
+                    workspace_root / "scripts" / "z3" / "commit_fuzzer" / "run_prepare_commit_fuzzer.sh",
+                    "Z3_COMMIT_HASH",
+                ),
+            ]
+
+            for name, script_path, _commit_env_var in wrapper_specs:
+                invocation_log = workdir / f"{name}-invocations.txt"
+                env = os.environ.copy()
+                env["INVOCATION_LOG"] = str(invocation_log)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        str(script_path),
+                        "3",
+                        "--python-script",
+                        str(stub_script),
+                        "--coverage-file",
+                        str(coverage_file),
+                    ],
+                    cwd=repo_root,
+                    env=env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    msg=f"{name} wrapper failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+                )
+                self.assertEqual(invocation_log.read_text(encoding="utf-8").splitlines(), expected_commits)
+                self.assertIn(
+                    "OVERALL SUMMARY: commits=3; total_functions=3; with_coverage=3; without_coverage=0; overall_coverage=100.0%",
+                    result.stdout,
+                )
+
+            override_log = workdir / "cvc5-override-invocations.txt"
+            override_env = os.environ.copy()
+            override_env.update(
+                {
+                    "INVOCATION_LOG": str(override_log),
+                    "CVC5_COMMIT_HASH": expected_commits[1],
+                }
+            )
+            override_result = subprocess.run(
+                [
+                    "bash",
+                    str(wrapper_specs[0][1]),
+                    "5",
+                    "--python-script",
+                    str(stub_script),
+                    "--coverage-file",
+                    str(coverage_file),
+                ],
+                cwd=repo_root,
+                env=override_env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                override_result.returncode,
+                0,
+                msg=f"cvc5 override wrapper failed\nstdout:\n{override_result.stdout}\nstderr:\n{override_result.stderr}",
+            )
+            self.assertEqual(override_log.read_text(encoding="utf-8").splitlines(), [expected_commits[1]])
+            self.assertIn(
+                "OVERALL SUMMARY: commits=1; total_functions=1; with_coverage=1; without_coverage=0; overall_coverage=100.0%",
+                override_result.stdout,
+            )
+
+    def test_cvc5_coverage_mapper_publishes_final_artifact(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mapper_text = (repo_root / ".github" / "workflows" / "cvc5-coverage-mapper.yml").read_text(encoding="utf-8")
+        analyzer_text = (repo_root / ".github" / "workflows" / "cvc5-commit-analyzer-test.yml").read_text(encoding="utf-8")
+
+        join_block = mapper_text.split("  join-mappings:", 1)[1].split("  update-state:", 1)[0]
+        self.assertIn("uses: actions/upload-artifact@v4", join_block)
+        self.assertIn("name: coverage-mapping", join_block)
+        self.assertIn("path: coverage_mapping.json.gz", join_block)
+        self.assertIn("name: coverage-mapping", analyzer_text)
+        self.assertIn("gunzip coverage_mapping.json.gz", analyzer_text)
 
     def test_discover_opensmt_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -269,6 +521,47 @@ class CommitHarnessTests(unittest.TestCase):
             self.assertIn("Workers: 1", combined_output)
             self.assertIn("Found 1 bug(s):", combined_output)
             self.assertIn("Bug #1: bugs/open-smt-bug.smt2", combined_output)
+
+    def test_opensmt_simple_commit_fuzzer_counts_collected_bugs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            bin_dir = workdir / "bin"
+            bin_dir.mkdir()
+
+            self._write_executable(
+                bin_dir / "opensmt",
+                """\
+                #!/bin/sh
+                exit 0
+                """,
+            )
+            self._write_executable(
+                bin_dir / "cvc5",
+                """\
+                #!/bin/sh
+                exit 0
+                """,
+            )
+
+            fuzzer = simple_commit_fuzzer.SimpleCommitFuzzer(
+                tests=[],
+                tests_root=str(workdir / "tests"),
+                bugs_folder=str(workdir / "bugs"),
+                num_workers=1,
+                iterations=1,
+                modulo=1,
+                opensmt_path=str(bin_dir / "opensmt"),
+                cvc5_path=str(bin_dir / "cvc5"),
+            )
+
+            worker_bug_dir = workdir / "bugs" / "worker_1"
+            worker_bug_dir.mkdir(parents=True, exist_ok=True)
+            (worker_bug_dir / "seed-bug.smt2").write_text("(check-sat)\n", encoding="utf-8")
+
+            fuzzer._move_worker_bug_files()
+
+            self.assertTrue((workdir / "bugs" / "seed-bug.smt2").exists())
+            self.assertEqual(fuzzer._get_stat("bugs_found"), 1)
 
     def test_opensmt_prepare_commit_fuzzer_generates_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

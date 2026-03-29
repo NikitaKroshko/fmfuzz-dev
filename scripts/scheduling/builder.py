@@ -13,13 +13,13 @@ from scheduling.s3_state import get_state_manager, S3StateError, DEFAULT_STATE_V
 
 def get_next_commit_to_build(solver: str) -> Optional[str]:
     """Get the next commit from build queue. Returns None if queue is empty.
-    Uses LIFO (Last In, First Out) to build latest commits first."""
+    The queue is appended in FIFO order, so we return the oldest queued commit."""
     manager = get_state_manager(solver)
     build_queue_filename = manager._get_versioned_filename('build-queue.json', DEFAULT_STATE_VERSION)
     queue = manager.read_state(build_queue_filename, default={'queue': []})
     queue_list = queue.get('queue', [])
-    # Return LAST commit (most recent) instead of FIRST (oldest)
-    return queue_list[-1] if queue_list else None
+    # Return the oldest queued commit first so builds follow FIFO order.
+    return queue_list[0] if queue_list else None
 
 
 def run_builder(solver: str) -> Optional[str]:
