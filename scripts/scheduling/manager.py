@@ -339,36 +339,34 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                     import traceback
                     print(f"       Traceback: {traceback.format_exc()}", file=sys.stderr)
         
-        # Update last_checked_commit to the newest commit (commits[0] is newest since GitHub API returns reverse chronological order)
-        # This ensures we don't re-check commits we've already processed
-        # IMPORTANT: commits[0] should always be HEAD (newest commit) when fetched from GitHub API
-        # If last_checked was set, commits[0] is the first commit AFTER last_checked (i.e., newer)
-        # If last_checked was None, commits[0] is HEAD (newest)
-        # 
-        # FAIL-SAFE: Only update if we didn't have too many processing errors
-        # This prevents updating state when something went wrong
+        # Only advance last_checked_commit when the whole batch was processed cleanly.
+        # If any commit in the fetched batch failed detection, keep the old checkpoint
+        # so the failed commit is retried on the next run instead of being skipped.
         print(f"\n💾 Updating last_checked_commit state...")
         print(f"   Processing errors: {processing_errors}/{max_processing_errors}")
         
         if processing_errors > max_processing_errors:
             print(f"❌ FATAL: Too many processing errors ({processing_errors}). Not updating last_checked_commit to prevent incorrect state.", file=sys.stderr)
             sys.exit(1)
-        
-        newest_commit = commits[0]
-        print(f"   Updating to: {newest_commit[:8]} (commits[0] from fetched batch)")
-        if last_checked:
-            print(f"   Previous value: {last_checked[:8]}")
-        
-        try:
-            manager.update_last_checked_commit(newest_commit)
-            print(f"   ✅ Successfully updated last_checked_commit to {newest_commit[:8]}")
-            if last_checked and last_checked != newest_commit:
-                print(f"   📝 State transition: {last_checked[:8]} → {newest_commit[:8]}")
-        except Exception as e:
-            print(f"   ❌ ERROR updating last_checked_commit: {e}", file=sys.stderr)
-            import traceback
-            print(f"   Traceback: {traceback.format_exc()}", file=sys.stderr)
-            raise
+
+        if processing_errors > 0:
+            print("   ⚠️  Leaving last_checked_commit unchanged because the batch had processing errors")
+        else:
+            newest_commit = commits[0]
+            print(f"   Updating to: {newest_commit[:8]} (commits[0] from fetched batch)")
+            if last_checked:
+                print(f"   Previous value: {last_checked[:8]}")
+
+            try:
+                manager.update_last_checked_commit(newest_commit)
+                print(f"   ✅ Successfully updated last_checked_commit to {newest_commit[:8]}")
+                if last_checked and last_checked != newest_commit:
+                    print(f"   📝 State transition: {last_checked[:8]} → {newest_commit[:8]}")
+            except Exception as e:
+                print(f"   ❌ ERROR updating last_checked_commit: {e}", file=sys.stderr)
+                import traceback
+                print(f"   Traceback: {traceback.format_exc()}", file=sys.stderr)
+                raise
     else:
         print(f"\n✅ No new commits to check")
         # If we reset due to old commit but got no commits, update to HEAD to prevent re-checking

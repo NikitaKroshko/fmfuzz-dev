@@ -15,7 +15,7 @@ python3 ../../scripts/opensmt/coverage/coverage_mapper.py \
     --opensmt-dir ../../opensmt \
     --start-index "${START_INDEX}" \
     --end-index "${END_INDEX}" \
-    --output "coverage_mapping_${START_INDEX}_${END_INDEX}.json" || true
+    --output "coverage_mapping_${START_INDEX}_${END_INDEX}.json"
 
 echo "Coverage analysis completed"
 exit 0

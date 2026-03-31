@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script to run commit coverage analysis for Z3 commits
+# Script to run commit coverage analysis for OpenSMT commits
 # Downloads coverage mapping artifact, gunzips it, and analyzes last N commits
 
 set -e
@@ -21,7 +21,7 @@ show_usage() {
     cat << EOF
 Usage: $0 [OPTIONS] COMMITS_TO_ANALYZE
 
-Run commit coverage analysis for Z3 commits.
+Run commit coverage analysis for OpenSMT commits.
 
 ARGUMENTS:
     COMMITS_TO_ANALYZE    Number of commits to analyze (default: 3)
@@ -122,7 +122,7 @@ if [[ -n "$MAX_JOBS" ]] && (! [[ "$MAX_JOBS" =~ ^[0-9]+$ ]] || [[ "$MAX_JOBS" -l
 fi
 
 echo "=========================================="
-echo "Z3 Commit Coverage Analysis"
+echo "OpenSMT Commit Coverage Analysis"
 echo "=========================================="
 
 # Check if we're in a git repository
@@ -152,9 +152,9 @@ fi
 echo "Getting commits that changed files in src/ folder..."
 
 # Use the provided override if set, otherwise collect the requested number of recent commits.
-if [ -n "$Z3_COMMIT_HASH" ]; then
-    echo "Using provided commit hash: $Z3_COMMIT_HASH"
-    COMMITS=("$Z3_COMMIT_HASH")
+if [ -n "$OPENSMT_COMMIT_HASH" ]; then
+    echo "Using provided commit hash: $OPENSMT_COMMIT_HASH"
+    COMMITS=("$OPENSMT_COMMIT_HASH")
 else
     COMMITS=()
     while IFS= read -r commit; do
@@ -191,46 +191,46 @@ for commit in "${COMMITS[@]}"; do
     echo "=========================================="
     echo "ANALYZING COMMIT $COMMIT_COUNT/$COMMITS_TO_ANALYZE"
     echo "=========================================="
-    
+
     COMMIT_MSG=$(git log --format="%s" -n 1 $commit)
     COMMIT_AUTHOR=$(git log --format="%an" -n 1 $commit)
     COMMIT_DATE=$(git log --format="%ad" -n 1 $commit)
-    
+
     echo "Commit: $commit"
     echo "Message: $COMMIT_MSG"
     echo "Author: $COMMIT_AUTHOR"
     echo "Date: $COMMIT_DATE"
     echo ""
-    
+
     # Run the coverage analysis (capture output for aggregation)
     TMP_OUT=$(mktemp)
-    
+
     # Build the command with all arguments
     PYTHON_ARGS=()
     PYTHON_ARGS+=("$commit")
     PYTHON_ARGS+=("--coverage-json" "$COVERAGE_FILE")
-    
+
     if [ -n "$COMPILE_COMMANDS" ]; then
         PYTHON_ARGS+=("--compile-commands" "$COMPILE_COMMANDS")
     fi
-    
+
     if [ -n "$OUTPUT_MATRIX" ]; then
         PYTHON_ARGS+=("--output-matrix" "$OUTPUT_MATRIX")
     fi
-    
+
     # Add matrix grouping arguments
     if [ "$TESTS_PER_JOB" != "1" ]; then
         PYTHON_ARGS+=("--tests-per-job" "$TESTS_PER_JOB")
     fi
-    
+
     if [ -n "$MAX_JOBS" ]; then
         PYTHON_ARGS+=("--max-jobs" "$MAX_JOBS")
     fi
-    
+
     echo "Running: python3 $PYTHON_SCRIPT ${PYTHON_ARGS[*]}"
     python3 "$PYTHON_SCRIPT" "${PYTHON_ARGS[@]}" | tee "$TMP_OUT"
     COMMITS_PROCESSED=$((COMMITS_PROCESSED + 1))
-    # Parse summary line if present
+
     LINE=$(grep -E "Changed functions: [0-9]+; with coverage: [0-9]+; without: [0-9]+;" "$TMP_OUT" | tail -n 1 || true)
     if [ -n "$LINE" ]; then
         CF=$(echo "$LINE" | sed -n 's/.*Changed functions: \([0-9][0-9]*\);.*/\1/p')
@@ -241,7 +241,7 @@ for commit in "${COMMITS[@]}"; do
         TOTAL_WITHOUT=$((TOTAL_WITHOUT + WO))
     fi
     rm -f "$TMP_OUT"
-    
+
     echo ""
     echo "----------------------------------------"
     echo ""
@@ -261,7 +261,6 @@ echo "OVERALL SUMMARY: commits=${COMMITS_PROCESSED}; total_functions=${TOTAL_FUN
 
 # Optionally enforce minimum coverage (default: enforce)
 if [ "$SKIP_COVERAGE_ENFORCEMENT" != "true" ]; then
-  # Convert to integer comparison by rounding down
   COV_INT=${COV_PCT%.*}
   if [ "$COV_INT" -lt "$MIN_OVERALL_COVERAGE" ]; then
     echo "Minimum overall coverage (${MIN_OVERALL_COVERAGE}%) not met: ${COV_PCT}%"

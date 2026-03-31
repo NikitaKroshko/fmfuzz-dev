@@ -18,11 +18,8 @@ def main() -> int:
                 mapping_files.append(os.path.join(root, file))
 
     if not mapping_files:
-        print("No coverage mapping files found, writing empty mapping")
-        with open("coverage_mapping.json", "w", encoding="utf-8") as f:
-            json.dump({}, f, separators=(",", ":"))
-        os.system("gzip -kf coverage_mapping.json")
-        return 0
+        print("No coverage mapping files found!")
+        return 1
 
     mapping_files.sort()
     print(f"Found {len(mapping_files)} mapping files")
@@ -44,7 +41,7 @@ def main() -> int:
     original_size = os.path.getsize("coverage_mapping.json")
     print(f"Original size: {original_size:,} bytes")
 
-    os.system("gzip -kf coverage_mapping.json")
+    os.system("gzip -k coverage_mapping.json")
     compressed_size = os.path.getsize("coverage_mapping.json.gz")
     compression_ratio = (compressed_size / original_size) * 100 if original_size else 0
     print(f"Compressed size: {compressed_size:,} bytes ({compression_ratio:.1f}% of original)")
