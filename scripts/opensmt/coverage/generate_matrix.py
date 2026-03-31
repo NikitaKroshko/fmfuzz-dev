@@ -73,11 +73,11 @@ def generate_matrix(
         avg_test_time_seconds=avg_test_time_seconds,
     )
 
-    print(f"Total jobs: {total_jobs}, Tests per job: {tests_per_job}", file=sys.stderr)
-
     matrix_entries = []
     for job_id in range(1, total_jobs + 1):
         start_index = (job_id - 1) * tests_per_job + 1
+        if start_index > total_tests:
+            break
         end_index = min(job_id * tests_per_job, total_tests)
         matrix_entries.append(
             {
@@ -86,6 +86,9 @@ def generate_matrix(
                 "end_index": end_index,
             }
         )
+
+    total_jobs = len(matrix_entries)
+    print(f"Total jobs: {total_jobs}, Tests per job: {tests_per_job}", file=sys.stderr)
 
     return {
         "matrix": {"include": matrix_entries},

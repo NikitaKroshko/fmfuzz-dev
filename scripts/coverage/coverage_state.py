@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Manage coverage test count state in S3.
-Determines when to rebuild coverage mappings based on test count changes and time elapsed.
+Determines when to rebuild coverage mappings based on commit drift, test count changes,
+and time elapsed.
 """
 
 import argparse
@@ -75,19 +76,21 @@ class CoverageStateManager:
             print(f"Warning: State file contains invalid JSON: {e}", file=sys.stderr)
             return None
 
-    def should_rebuild(self, current_test_count: int) -> Dict:
+    def should_rebuild(self, current_test_count: int, current_commit_hash: Optional[str] = None) -> Dict:
         """
         Determine if coverage mapping should be rebuilt.
 
         Decision logic:
         1. No state file exists → REBUILD (first run)
-        2. Test count > old count → REBUILD (new tests added)
-        3. Days since last > 30 → REBUILD (safety net)
-        4. Test count < old count → REBUILD (tests removed, investigate)
-        5. Otherwise → SKIP (no changes, <30 days)
+        2. Commit hash changed → REBUILD (mapping is commit-specific)
+        3. Test count > old count → REBUILD (new tests added)
+        4. Days since last > 30 → REBUILD (safety net)
+        5. Test count < old count → REBUILD (tests removed, investigate)
+        6. Otherwise → SKIP (no changes, <30 days)
 
         Args:
             current_test_count: Current number of tests
+            current_commit_hash: Current solver commit hash, if known
 
         Returns:
             Dictionary with:
@@ -110,11 +113,22 @@ class CoverageStateManager:
             }
 
         old_test_count = state['test_count']
+        previous_commit_hash = state.get('commit_hash')
         last_build_timestamp = datetime.fromisoformat(state['last_build_timestamp'].replace('Z', '+00:00'))
         now = datetime.now(timezone.utc)
         days_since_last = (now - last_build_timestamp).total_seconds() / 86400
 
-        # Case 2: Test count increased (new tests added)
+        # Case 2: Commit changed (coverage mapping is commit-specific)
+        if current_commit_hash and previous_commit_hash and current_commit_hash != previous_commit_hash:
+            return {
+                'should_rebuild': True,
+                'reason': f'Commit changed: {previous_commit_hash[:8]} → {current_commit_hash[:8]}',
+                'old_count': old_test_count,
+                'new_count': current_test_count,
+                'days_since_last': days_since_last
+            }
+
+        # Case 3: Test count increased (new tests added)
         if current_test_count > old_test_count:
             return {
                 'should_rebuild': True,
@@ -124,7 +138,7 @@ class CoverageStateManager:
                 'days_since_last': days_since_last
             }
 
-        # Case 3: 30-day threshold exceeded (safety net)
+        # Case 4: 30-day threshold exceeded (safety net)
         if days_since_last > self.REBUILD_THRESHOLD_DAYS:
             return {
                 'should_rebuild': True,
@@ -134,7 +148,7 @@ class CoverageStateManager:
                 'days_since_last': days_since_last
             }
 
-        # Case 4: Test count decreased (tests removed/disabled)
+        # Case 5: Test count decreased (tests removed/disabled)
         if current_test_count < old_test_count:
             return {
                 'should_rebuild': True,
@@ -144,7 +158,7 @@ class CoverageStateManager:
                 'days_since_last': days_since_last
             }
 
-        # Case 5: No changes, skip rebuild
+        # Case 6: No changes, skip rebuild
         return {
             'should_rebuild': False,
             'reason': f'No changes (count={current_test_count}, last_build={days_since_last:.1f} days ago)',
@@ -197,7 +211,7 @@ def main():
         epilog="""
 Examples:
   # Check if rebuild needed
-  python3 scripts/coverage/coverage_state.py cvc5 check --test-count 12345 --output decision.json
+  python3 scripts/coverage/coverage_state.py cvc5 check --test-count 12345 --commit-hash abc123 --output decision.json
 
   # Update state after successful build
   python3 scripts/coverage/coverage_state.py cvc5 update --test-count 12345 --commit-hash abc123
@@ -231,7 +245,7 @@ Environment variables:
 
     parser.add_argument(
         '--commit-hash',
-        help='Solver commit hash (required for update)'
+        help='Solver commit hash (required for update, recommended for check)'
     )
 
     parser.add_argument(
@@ -282,7 +296,7 @@ Environment variables:
         if args.test_count is None:
             parser.error('--test-count is required for check command')
 
-        decision = manager.should_rebuild(args.test_count)
+        decision = manager.should_rebuild(args.test_count, current_commit_hash=args.commit_hash)
 
         # Print decision summary to stderr
         if decision['should_rebuild']:

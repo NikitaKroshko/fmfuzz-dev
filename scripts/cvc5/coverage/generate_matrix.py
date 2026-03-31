@@ -3,6 +3,7 @@
 
 import json
 import sys
+import math
 from coverage_mapper import CoverageMapper
 
 
@@ -13,24 +14,24 @@ def calculate_jobs(total_tests: int, target_jobs: int, max_job_time_minutes: int
         raise ValueError("max_job_time_minutes must be greater than buffer_minutes")
 
     available_time_seconds = (max_job_time_minutes - buffer_minutes) * 60
-    max_tests_per_job = int(available_time_seconds / avg_test_time_seconds)
-    min_jobs = (total_tests + max_tests_per_job - 1) // max_tests_per_job
+    max_tests_per_job = max(1, int(available_time_seconds / avg_test_time_seconds))
+    min_jobs = max(1, math.ceil(total_tests / max_tests_per_job))
     
     # Try target_jobs, increase if needed
-    total_jobs = target_jobs
+    total_jobs = min(max(1, target_jobs), total_tests)
     while True:
-        tests_per_job = max(1, (total_tests + total_jobs - 1) // total_jobs)
+        tests_per_job = max(1, math.ceil(total_tests / total_jobs))
         estimated_minutes = (tests_per_job * avg_test_time_seconds + buffer_minutes * 60) / 60.0
         
         if estimated_minutes <= max_job_time_minutes:
             break
         
-        if total_jobs >= min_jobs:
-            total_jobs = min_jobs
-            tests_per_job = max(1, (total_tests + total_jobs - 1) // total_jobs)
+        if total_jobs >= min_jobs or total_jobs >= total_tests:
+            total_jobs = min(total_tests, min_jobs)
+            tests_per_job = max(1, math.ceil(total_tests / total_jobs))
             break
         
-        total_jobs += 1
+        total_jobs = min(total_tests, total_jobs + 1)
     
     return total_jobs, tests_per_job
 
@@ -69,6 +70,8 @@ def generate_matrix(build_dir: str = "build", max_job_time_minutes: int = 60,
     matrix_entries = []
     for job_id in range(1, total_jobs + 1):
         start_index = (job_id - 1) * tests_per_job + 1
+        if start_index > total_tests:
+            break
         end_index = min(job_id * tests_per_job, total_tests)
         matrix_entries.append({
             'job_name': generate_job_name(job_id),

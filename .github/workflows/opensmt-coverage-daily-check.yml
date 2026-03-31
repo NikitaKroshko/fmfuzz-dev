@@ -64,6 +64,7 @@ jobs:
         run: |
           python3 scripts/coverage/coverage_state.py opensmt check \
             --test-count ${{ steps.count-tests.outputs.test_count }} \
+            --commit-hash ${{ steps.count-tests.outputs.commit_hash }} \
             --output decision.json
 
           SHOULD_REBUILD=$(jq -r '.should_rebuild' decision.json)

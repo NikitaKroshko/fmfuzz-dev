@@ -25,6 +25,7 @@ except ImportError as e:
     sys.exit(1)
 
 from scheduling.detect_cpp_changes import detect_cpp_changes
+from scripts.diff_utils import FileDiff, parse_unified_diff
 
 
 class EvaluationS3Manager:
@@ -116,27 +117,8 @@ def init_tree_sitter():
             raise RuntimeError("Install: pip install tree-sitter-languages")
 
 
-def parse_diff(diff_text: str) -> Dict[str, set]:
-    changed_files_lines = {}
-    current_file = None
-    new_line = None
-    
-    for line in diff_text.split('\n'):
-        if line.startswith('+++ b/'):
-            current_file = line[6:].strip()
-            changed_files_lines.setdefault(current_file, set())
-            new_line = None
-        elif line.startswith('@@ '):
-            match = re.search(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
-            if match and current_file:
-                new_line = int(match.group(1))
-        elif line.startswith('+') and not line.startswith('+++') and current_file and new_line:
-            changed_files_lines[current_file].add(new_line)
-            new_line += 1
-        elif line.startswith(' ') and new_line is not None:
-            new_line += 1
-    
-    return changed_files_lines
+def parse_diff(diff_text: str) -> Dict[str, FileDiff]:
+    return parse_unified_diff(diff_text)
 
 
 FUNCTION_QUERY = """
@@ -161,40 +143,53 @@ FUNCTION_QUERY = """
 
 def analyze_commit_functions(commit_hash: str, repo_path: str, solver: str) -> Dict:
     repo = git.Repo(repo_path)
+    try:
+        commit = repo.commit(commit_hash)
+        parent_hash = commit.parents[0].hexsha if commit.parents else None
+    except Exception:
+        parent_hash = None
     
     diff_result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash],
                                  capture_output=True, text=True, cwd=repo_path)
     if diff_result.returncode != 0:
         raise RuntimeError(f"Failed to get diff for {commit_hash}")
     
-    changed_files_lines = parse_diff(diff_result.stdout)
+    changed_files = parse_diff(diff_result.stdout)
     cpp_language, parser = init_tree_sitter()
     query = cpp_language.query(FUNCTION_QUERY)
     
     function_details = []
     files_with_no_functions = []
     cpp_exts = {'.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.hxx', '.hh'}
-    
-    for file_path, changed_lines in changed_files_lines.items():
-        if not any(file_path.endswith(ext) for ext in cpp_exts):
-            continue
-        
-        file_result = subprocess.run(['git', 'show', f'{commit_hash}:{file_path}'],
-                                     capture_output=True, text=True, cwd=repo_path)
-        if file_result.returncode != 0:
-            files_with_no_functions.append(file_path)
-            continue
-        
-        file_bytes = bytes(file_result.stdout, 'utf8')
+
+    def read_file_at_commit(revision: Optional[str], file_path: Optional[str]) -> Optional[str]:
+        if not revision or not file_path or file_path == '/dev/null':
+            return None
+        result = subprocess.run(['git', 'show', f'{revision}:{file_path}'],
+                                capture_output=True, text=True, cwd=repo_path)
+        if result.returncode != 0:
+            return None
+        return result.stdout
+
+    def normalize_code(code: str) -> str:
+        code = re.sub(r'//.*', '', code)
+        code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
+        code = re.sub(r'\s+', ' ', code).strip()
+        return code
+
+    def extract_functions(source_text: Optional[str], file_path: str) -> List[Dict]:
+        if source_text is None:
+            return []
+
+        file_bytes = source_text.encode('utf8')
         try:
             tree = parser.parse(file_bytes)
         except Exception:
-            files_with_no_functions.append(file_path)
-            continue
-        
+            return []
+
         captures = query.captures(tree.root_node)
         func_map = {}
-        
+
         for node, tag in captures:
             if tag == "func.name":
                 func_node = node.parent
@@ -202,17 +197,60 @@ def analyze_commit_functions(commit_hash: str, repo_path: str, solver: str) -> D
                     func_node = func_node.parent
                 if func_node:
                     func_map[func_node] = file_bytes[node.start_byte:node.end_byte].decode('utf8', errors='ignore')
-        
-        found_functions = set()
+
+        functions = []
+        lines = source_text.splitlines()
         for func_node, func_name in func_map.items():
             start_line = func_node.start_point[0] + 1
             end_line = func_node.end_point[0] + 1
-            if changed_lines & set(range(start_line, end_line + 1)):
-                func_key = (file_path, func_name, start_line)
-                if func_key not in found_functions:
-                    found_functions.add(func_key)
-                    function_details.append({'file': file_path, 'function': func_name, 'line': start_line})
-        
+            body = "\n".join(lines[start_line - 1:end_line])
+            functions.append({
+                'file': file_path,
+                'function': func_name,
+                'line': start_line,
+                'end_line': end_line,
+                'body': normalize_code(body),
+            })
+        return functions
+
+    def function_key(function: Dict) -> tuple[str, str]:
+        return function['file'], function['function']
+
+    for file_path, file_diff in changed_files.items():
+        if not any(file_path.endswith(ext) for ext in cpp_exts):
+            continue
+
+        after_path = file_diff.new_path if file_diff.new_path != '/dev/null' else None
+        before_path = file_diff.old_path if file_diff.old_path != '/dev/null' else None
+        after_functions = extract_functions(read_file_at_commit(commit_hash, after_path), after_path or file_path)
+        before_functions = extract_functions(read_file_at_commit(parent_hash, before_path), before_path or file_path)
+
+        after_by_key = {function_key(func): func for func in after_functions}
+        before_by_key = {function_key(func): func for func in before_functions}
+
+        selected: Dict[tuple[str, str], Dict] = {}
+        for func in after_functions:
+            if file_diff.overlaps_after(func['line'], func['end_line']):
+                selected[function_key(func)] = func
+
+        for func in before_functions:
+            key = function_key(func)
+            if key not in selected and file_diff.overlaps_before(func['line'], func['end_line']):
+                selected[key] = func
+
+        found_functions = set()
+        for key, func in selected.items():
+            after_func = after_by_key.get(key)
+            before_func = before_by_key.get(key)
+            if after_func and before_func and after_func['body'] == before_func['body']:
+                continue
+
+            func_key = (func['file'], func['function'], func['line'])
+            if func_key in found_functions:
+                continue
+            found_functions.add(func_key)
+            function_details.append({'file': func['file'], 'function': func['function'], 'line': func['line']})
+
         if not found_functions:
             files_with_no_functions.append(file_path)
     

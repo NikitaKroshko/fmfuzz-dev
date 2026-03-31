@@ -35,6 +35,7 @@ jobs:
       matrix: ${{ steps.generate-matrix.outputs.matrix }}
       total_tests: ${{ steps.generate-matrix.outputs.total_tests }}
       total_jobs: ${{ steps.generate-matrix.outputs.total_jobs }}
+      commit_hash: ${{ steps.resolve-commit.outputs.commit_hash }}
     
     steps:
       - name: Checkout
@@ -50,12 +51,16 @@ jobs:
             cd cvc5
           fi
       
-      - name: Checkout CVC5 specific commit if provided
-        if: inputs.cvc5_commit_hash != ''
+      - name: Resolve analyzed CVC5 commit
+        id: resolve-commit
         run: |
           cd cvc5
-          git checkout ${{ inputs.cvc5_commit_hash }}
-          echo "Checked out commit: $(git rev-parse HEAD)"
+          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+            git checkout "${{ inputs.cvc5_commit_hash }}"
+          fi
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "Checked out commit: $COMMIT_HASH"
       
       - name: Configure CMake (for ctest discovery)
         run: |
@@ -112,11 +117,10 @@ jobs:
             cd cvc5
           fi
       
-      - name: Checkout CVC5 specific commit if provided
-        if: inputs.cvc5_commit_hash != ''
+      - name: Checkout resolved CVC5 commit
         run: |
           cd cvc5
-          git checkout ${{ inputs.cvc5_commit_hash }}
+          git checkout "${{ needs.discover-tests.outputs.commit_hash }}"
           echo "Checked out commit: $(git rev-parse HEAD)"
       
       - name: Build CVC5 with coverage
@@ -139,31 +143,22 @@ jobs:
     runs-on: ubuntu-latest
     needs: [discover-tests, coverage-analysis]
     outputs:
-      commit_hash: ${{ steps.get-commit.outputs.commit_hash }}
+      commit_hash: ${{ steps.use-commit.outputs.commit_hash }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Get CVC5 commit hash
-        id: get-commit
+      - name: Use analyzed CVC5 commit hash
+        id: use-commit
         run: |
-          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
-            # Use provided commit hash
-            COMMIT_HASH="${{ inputs.cvc5_commit_hash }}"
-          else
-            # Get commit hash from one of the regress jobs (they all use the same commit)
-            # Clone and get HEAD commit if cvc5 doesn't exist
-            if [ ! -d "cvc5" ]; then
-              git clone https://github.com/cvc5/cvc5.git cvc5
-            fi
-            cd cvc5
-            git fetch origin
-            COMMIT_HASH=$(git rev-parse HEAD)
-            cd ..
+          COMMIT_HASH="${{ needs.discover-tests.outputs.commit_hash }}"
+          if [ -z "$COMMIT_HASH" ]; then
+            echo "❌ Missing analyzed commit hash from discover-tests"
+            exit 1
           fi
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
-          echo "CVC5 commit hash: $COMMIT_HASH"
+          echo "Using analyzed CVC5 commit hash: $COMMIT_HASH"
       
       - name: Download all coverage mappings
         uses: actions/download-artifact@v4
@@ -190,7 +185,7 @@ jobs:
       
       - name: Upload final coverage mapping to S3
         run: |
-          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          COMMIT_HASH="${{ steps.use-commit.outputs.commit_hash }}"
           S3_KEY="solvers/cvc5/coverage-mappings/coverage_mapping-${COMMIT_HASH}.json.gz"
           
           if [ ! -f "coverage_mapping.json.gz" ]; then

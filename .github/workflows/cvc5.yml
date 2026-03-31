@@ -132,15 +132,21 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
-          # Capture both stdout and stderr, but extract only "true" or "false" from stdout
-          CHECK_OUTPUT=$(python scripts/scheduling/s3_state.py cvc5 build-queue check "$COMMIT_HASH" 2>&1)
-          IN_QUEUE=$(echo "$CHECK_OUTPUT" | grep -E "^(true|false)$" | tail -1)
+          if ! CHECK_OUTPUT=$(python3 scripts/scheduling/check_build_queue.py cvc5 "$COMMIT_HASH" 2>check-queue.stderr); then
+            cat check-queue.stderr
+            exit 1
+          fi
+          if [ "$CHECK_OUTPUT" != "true" ] && [ "$CHECK_OUTPUT" != "false" ]; then
+            echo "❌ Unexpected build-queue response: $CHECK_OUTPUT"
+            cat check-queue.stderr
+            exit 1
+          fi
+          IN_QUEUE="$CHECK_OUTPUT"
           if [ "$IN_QUEUE" = "true" ]; then
             echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
             echo "should_upload=true" >> $GITHUB_OUTPUT
           else
             echo "⚠️  Commit $COMMIT_HASH was removed from queue, discarding build"
-            echo "DEBUG: Check output: $CHECK_OUTPUT"
             echo "should_upload=false" >> $GITHUB_OUTPUT
           fi
       
@@ -251,7 +257,16 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
-          IN_QUEUE=$(python scripts/scheduling/s3_state.py cvc5 build-queue check "$COMMIT_HASH" 2>&1 | tail -1)
+          if ! CHECK_OUTPUT=$(python3 scripts/scheduling/check_build_queue.py cvc5 "$COMMIT_HASH" 2>check-queue.stderr); then
+            cat check-queue.stderr
+            exit 1
+          fi
+          if [ "$CHECK_OUTPUT" != "true" ] && [ "$CHECK_OUTPUT" != "false" ]; then
+            echo "❌ Unexpected build-queue response: $CHECK_OUTPUT"
+            cat check-queue.stderr
+            exit 1
+          fi
+          IN_QUEUE="$CHECK_OUTPUT"
           if [ "$IN_QUEUE" = "true" ]; then
             echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
             echo "should_upload=true" >> $GITHUB_OUTPUT

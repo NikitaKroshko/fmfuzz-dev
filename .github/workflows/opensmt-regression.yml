@@ -1,0 +1,35 @@
+name: OpenSMT Regression Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Optional suite or path prefix to run (defaults to the full OpenSMT regression corpus)'
+        required: false
+        type: string
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build OpenSMT with coverage
+        run: bash "${{ github.workspace }}/scripts/opensmt/build.sh" --coverage
+
+      - name: Run OpenSMT regression tests
+        run: |
+          cd opensmt/build
+          if [ -n "${{ inputs.suite }}" ]; then
+            ../../scripts/measure_time.sh ../../scripts/opensmt/run_regression_tests.sh "${{ inputs.suite }}"
+          else
+            ../../scripts/measure_time.sh ../../scripts/opensmt/run_regression_tests.sh
+          fi
