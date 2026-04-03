@@ -281,7 +281,7 @@ def select_commits(categorized: Dict, small_count: int, medium_count: int, large
 
 def main():
     parser = argparse.ArgumentParser(description='RQ2 Commit Selection')
-    parser.add_argument('solver', choices=['z3', 'cvc5', 'opensmt'])
+    parser.add_argument('solver')
     parser.add_argument('repo_url')
     parser.add_argument('--years', type=int, default=2)
     parser.add_argument('--token', default=os.getenv('GITHUB_TOKEN'))

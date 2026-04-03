@@ -1,34 +1,39 @@
 ### Coverage Mapper
 
-### Problem
-Given an instrumented build and a test suite, compute a mapping from functions to the tests that execute them.
+### Purpose
+- Build an instrumented solver binary.
+- Discover the relevant test set.
+- Attribute covered functions to individual tests.
 
-### Input
-- cvc5 built with gcov instrumentation
-- Test list from CTest
+### Contract Integration
+- Coverage builds now use the same solver contract as the commit fuzzer.
+- The contract provides:
+  - repository checkout information
+  - the coverage build command
+  - the coverage binary path
+  - test discovery information
+- Coverage-specific analysis scripts remain separate from the shared fuzzing brain, but they should consume the workspace and binaries prepared through the contract-driven path.
+
+### Inputs
+- Instrumented solver build from `build.sh --instrumentation`
+- Test list from `test.sh --discover` or contract `test_root`
 
 ### Output
-- JSON map: `src/path:demangled_signature:start_line` → `[test_name,...]`
+- JSON map: `src/path:demangled_signature:start_line` -> `[test_name, ...]`
 
-### Algorithm (concise)
-1. Discover tests with `ctest --show-only`.
-2. For each test (or selected slice):
-   a. Reset counters (fastcov --zerocounters).
-   b. Run the test in isolation via `ctest -I i,i`.
-   c. Run fastcov to produce a per-test JSON report.
-   d. For each covered function under `src/` with execution_count > 0:
-      - Demangle symbol via c++filt to canonical signature (includes STL defaults, cv-qualifiers).
-      - Build function ID: `src/path:demangled_signature:start_line`.
-      - Append current test to that function’s list.
-3. Deduplicate and sort test lists; write JSON.
-
-### Notes
-- Per-test isolation yields precise test attribution vs cumulative coverage.
-- Demangling aligns signatures with downstream matching (e.g., analyzer).
-- Inlined/tiny functions may be absent as standalone symbols (attributed to callers).
+### Algorithm
+1. Discover tests for the selected solver workspace.
+2. Reset coverage counters.
+3. Run each test in isolation or in a bounded shard.
+4. Export per-test coverage.
+5. Normalize function identifiers.
+6. Merge shard outputs into `coverage_mapping.json(.gz)`.
 
 ### Artifacts
-- Sharded JSONs: `coverage_mapping_START_END.json`
-- Merged artifact: `coverage_mapping.json(.gz)`
+- Sharded coverage mapping files
+- Final merged `coverage_mapping.json(.gz)`
+- Build logs and coverage byproducts from contract-declared artifact paths
 
-
+### Guidance
+- Keep solver-specific parsing or report-merging logic outside the shared brain.
+- Do not hardcode checkout URLs or build commands in workflows when the contract already defines them.

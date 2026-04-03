@@ -7,19 +7,18 @@ on:
   workflow_dispatch:
     inputs:
       opensmt_commit_hash:
-        description: 'Optional: OpenSMT commit hash to fuzz (defaults to upstream HEAD)'
+        description: "Optional: OpenSMT commit hash to fuzz (defaults to upstream HEAD)"
         required: false
         type: string
       stop_buffer_minutes:
-        description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
+        description: "Optional: Minutes before timeout to stop fuzzing (default: 5)"
         required: false
         type: number
         default: 5
   schedule:
-    - cron: '45 0,5,10,15,20 * * *'
+    - cron: "45 0,5,10,15,20 * * *"
 
 concurrency:
-  # Keep scheduled and manual runs from canceling each other.
   group: ${{ github.workflow }}-${{ github.event_name }}
   cancel-in-progress: true
 
@@ -40,118 +39,87 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install system dependencies
+      - name: Install base tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            libc6-dev \
-            gcc \
-            g++ \
-            binutils \
-            libstdc++-14-dev \
-            libc++-dev \
-            libc++abi-dev \
-            jq \
-            zlib1g \
-            zlib1g-dev \
-            unzip
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get install -y jq
+          pip install psutil requests antlr4-python3-runtime==4.9.2 "yinyang==0.3.0"
 
-      - name: Install Python dependencies
+      - name: Install contract system dependencies
         run: |
-          pip install psutil requests antlr4-python3-runtime==4.9.2
-          git clone https://github.com/testsmt/yinyang.git
-          cd yinyang
-          pip install -e .
-          cd ..
-
-      - name: Clone OpenSMT repository
-        run: |
-          if [ -d "opensmt" ]; then
-            echo "OpenSMT directory already exists, skipping clone"
-          else
-            git clone https://github.com/usi-verification-and-security/OpenSMT.git opensmt
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
           fi
 
-      - name: Fetch OpenSMT refs
-        working-directory: opensmt
-        run: git fetch --all --tags
-
-      - name: Checkout OpenSMT commit
-        if: inputs.opensmt_commit_hash != ''
-        working-directory: opensmt
+      - name: Checkout OpenSMT workspace
         run: |
-          git checkout ${{ inputs.opensmt_commit_hash }}
-          echo "Checked out commit: $(git rev-parse HEAD)"
+          CHECKOUT_ARGS=()
+          if [ -n "${{ inputs.opensmt_commit_hash }}" ]; then
+            CHECKOUT_ARGS+=(--commit-hash "${{ inputs.opensmt_commit_hash }}")
+          fi
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            checkout \
+            "${CHECKOUT_ARGS[@]}" \
+            --json > opensmt-checkout.json
 
-      - name: Record OpenSMT commit hash
-        id: get-commit
-        working-directory: opensmt
-        run: |
-          echo "commit_hash=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "OpenSMT commit hash: $(git rev-parse HEAD)"
-
-      - name: Build OpenSMT static binary
-        run: bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static
-
-      - name: Install CVC5 oracle
+      - name: Install CVC5 reference binary
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/download_cvc5.py "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Generate local test set
-        id: build-matrix
-        env:
-          PYTHONPATH: ${{ github.workspace }}
+      - name: Build OpenSMT target binary
         run: |
-          python3 scripts/local_commit_fuzzer_matrix.py opensmt \
-            --opensmt-dir opensmt \
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            build \
+            --mode production \
+            --json > opensmt-build.json
+
+      - name: Generate local test set
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            matrix \
             --limit-tests "${LOCAL_TEST_LIMIT}" \
             --max-jobs 1 \
             --output matrix.json
 
+      - name: Run local commit fuzzer
+        run: |
           TEST_COUNT=$(jq -r '.total_tests' matrix.json)
           if [ "$TEST_COUNT" = "0" ]; then
             echo "No tests discovered"
-            echo "tests_json=[]" >> "$GITHUB_OUTPUT"
-            echo "test_count=0" >> "$GITHUB_OUTPUT"
-          else
-            TESTS_JSON=$(jq -c '.matrix.include[0].tests' matrix.json)
-            echo "tests_json=$TESTS_JSON" >> "$GITHUB_OUTPUT"
-            echo "test_count=$TEST_COUNT" >> "$GITHUB_OUTPUT"
-            echo "Selected $TEST_COUNT tests"
+            exit 0
           fi
 
-      - name: Run local commit fuzzer
-        if: steps.build-matrix.outputs.test_count != '0'
-        working-directory: opensmt
-        env:
-          TESTS_JSON: ${{ steps.build-matrix.outputs.tests_json }}
-        run: |
-          mkdir -p ../logs ../bugs
+          TESTS_JSON=$(jq -c '.matrix.include[0].tests' matrix.json)
+          TARGET_BINARY=$(jq -r '.binary_path' opensmt-build.json)
           STOP_BUFFER="${{ inputs.stop_buffer_minutes || 5 }}"
 
-          trap '' PIPE
-          trap 'echo "⏰ Shutdown signal received, stopping workers..." >&2; exit 0' SIGTERM SIGINT
-
+          mkdir -p logs bugs
           set -o pipefail
-          bash "${{ github.workspace }}/scripts/opensmt/commit_fuzzer/run_simple_fuzzer.sh" \
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            run-harness \
             --tests-json "$TESTS_JSON" \
-            --job-id 'opensmt-local' \
-            --tests-root 'test/regression' \
+            --job-id "opensmt-local" \
             --job-start-time "$JOB_START" \
             --stop-buffer-minutes "$STOP_BUFFER" \
             --iterations 250 \
-            --workers 4 \
-            --opensmt-path ./build/bin/opensmt \
-            --cvc5-path "$HOME/.local/bin/cvc5" \
-            |& tee "../logs/opensmt-fuzzer.log"
+            --target-binary "$TARGET_BINARY" \
+            --reference-binary "$HOME/.local/bin/cvc5" \
+            --bugs-folder bugs \
+            |& tee logs/opensmt-fuzzer.log
 
       - name: Upload local matrix
         if: always()
@@ -175,6 +143,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: opensmt-bugs
-          path: opensmt/bugs
+          path: bugs
           retention-days: 1
           if-no-files-found: ignore

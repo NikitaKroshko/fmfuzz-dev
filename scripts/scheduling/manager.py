@@ -432,7 +432,7 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Manager job for fuzzing system')
-    parser.add_argument('solver', choices=['z3', 'cvc5', 'opensmt'], help='Solver name')
+    parser.add_argument('solver', help='Solver name')
     parser.add_argument('repo_url', help='Repository URL')
     parser.add_argument('--token', help='GitHub token', default=os.getenv('GITHUB_TOKEN'))
     

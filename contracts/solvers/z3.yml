@@ -1,0 +1,32 @@
+solver_name: z3
+repository_url: https://github.com/Z3Prover/z3.git
+repository_path: z3
+issues_url: null
+tests_repository_url: https://github.com/z3prover/z3test.git
+tests_repository_path: z3test
+build_command: scripts/z3/build.sh
+coverage_build_command: scripts/z3/build.sh --instrumentation
+production_binary_path: build/z3
+coverage_binary_path: build/z3
+test_root: .
+test_discovery_command: scripts/z3/test.sh --discover
+target_commands:
+  - "{target_binary} smt.threads=1 memory_max_size=2048 model_validate=true"
+  - "{reference_binary} --check-models --check-proofs --strings-exp"
+oracle_command: python3 scripts/oracle.py --cvc5-path {reference_binary} --solver-path {target_binary} --solver-flags model_validate=true {test_file}
+environment_requirements:
+  packages:
+    - build-essential
+    - cmake
+    - git
+    - python3
+  env:
+    - GCOV_PREFIX
+    - GCOV_PREFIX_STRIP
+artifact_paths:
+  - build/z3
+  - build/compile_commands.json
+  - build/include
+  - build/src
+artifact_s3_bucket: null
+artifact_s3_prefix: null

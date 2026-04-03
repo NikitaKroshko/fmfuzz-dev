@@ -1,116 +1,82 @@
-#!/bin/bash
-# Z3 Build and Test Script
-# This script clones, builds, and tests Z3 following CI best practices
-# Usage: ./build.sh [--coverage] [--static]
-#   --coverage: Enable coverage instrumentation
-#   --static: Build static binary (note: Z3 uses static by default when LIBZ3_SHARED=OFF)
-#   --static --coverage: Build static binary with coverage
+#!/usr/bin/env bash
 
-set -e  # Exit on any error
+set -euo pipefail
 
-# Parse command line arguments
-ENABLE_COVERAGE=false
-ENABLE_STATIC=false
+usage() {
+  cat <<'USAGE' >&2
+Usage: build.sh [--instrumentation|--coverage] [--static]
+
+Builds the checked-out z3 repository from SOLVER_WORKSPACE.
+The final stdout line is always: BINARY_PATH=/abs/path/to/binary
+USAGE
+}
+
+cpu_count() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
+  else
+    sysctl -n hw.logicalcpu
+  fi
+}
+
+MODE="production"
+
 for arg in "$@"; do
-    if [[ "$arg" == "--coverage" ]]; then
-        ENABLE_COVERAGE=true
-    elif [[ "$arg" == "--static" ]]; then
-        ENABLE_STATIC=true
-    fi
+  case "$arg" in
+    --instrumentation|--coverage)
+      MODE="instrumentation"
+      ;;
+    --static)
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      usage
+      exit 2
+      ;;
+  esac
 done
 
-if [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "🔍 Coverage instrumentation will be enabled"
-fi
-if [[ "$ENABLE_STATIC" == "true" ]]; then
-    echo "📦 Static binary build will be enabled"
-fi
-
-echo "🔧 Installing basic tools..."
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  git \
-  python3 \
-  python3-pip
-
-# Install coverage tools if coverage is enabled
-if [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "📊 Installing coverage tools..."
-    sudo apt-get install -y gcc
-    # Install fastcov and psutil for coverage analysis
-    pip3 install fastcov psutil
-    
-    # Set environment variables for coverage collection
-    export GCOV_PREFIX=$(pwd)/z3/build
-    export GCOV_PREFIX_STRIP=0
-    echo "🔧 Set coverage environment variables:"
-    echo "  GCOV_PREFIX=$GCOV_PREFIX"
-    echo "  GCOV_PREFIX_STRIP=$GCOV_PREFIX_STRIP"
+SOLVER_ROOT="${SOLVER_WORKSPACE:-$(pwd)/z3}"
+if [[ ! -d "$SOLVER_ROOT" ]]; then
+  echo "Missing solver workspace: $SOLVER_ROOT" >&2
+  exit 1
 fi
 
-echo "📥 Cloning Z3 repository..."
-if [ -d "z3" ]; then
-    echo "⚠️  Z3 directory already exists, skipping clone"
-else
-    git clone https://github.com/Z3Prover/z3.git z3
-fi
+echo "Building z3 in $SOLVER_ROOT" >&2
+echo "Mode: $MODE" >&2
 
-echo "🔨 Building Z3..."
-cd z3
-
+cd "$SOLVER_ROOT"
+rm -rf build
 mkdir -p build
 cd build
 
-# Configure build based on flags
-if [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "🔍 Configuring Z3 with coverage instrumentation..."
-    CFLAGS="-O0 -g --coverage" CXXFLAGS="-O0 -g --coverage" \
-      cmake -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DZ3_BUILD_LIBZ3_SHARED=OFF \
-            -DZ3_BUILD_EXECUTABLE=ON \
-            -DZ3_BUILD_TEST_EXECUTABLES=OFF \
-            -G "Unix Makefiles" ..
-elif [[ "$ENABLE_STATIC" == "true" ]]; then
-    echo "📦 Configuring Z3 for static binary (production)..."
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-          -DZ3_BUILD_LIBZ3_SHARED=OFF \
-          -DZ3_BUILD_EXECUTABLE=ON \
-          -DZ3_BUILD_TEST_EXECUTABLES=OFF \
-          -G "Unix Makefiles" ..
+COMMON_FLAGS=(
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+  -DZ3_BUILD_LIBZ3_SHARED=OFF
+  -DZ3_BUILD_EXECUTABLE=ON
+  -DZ3_BUILD_TEST_EXECUTABLES=OFF
+  -G
+  "Unix Makefiles"
+)
+
+if [[ "$MODE" == "instrumentation" ]]; then
+  CFLAGS="-O0 -g --coverage" \
+  CXXFLAGS="-O0 -g --coverage" \
+    cmake -DCMAKE_BUILD_TYPE=Debug "${COMMON_FLAGS[@]}" ..
 else
-    echo "⚡ Configuring Z3 for production (no coverage)..."
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-          -DZ3_BUILD_LIBZ3_SHARED=OFF \
-          -DZ3_BUILD_EXECUTABLE=ON \
-          -DZ3_BUILD_TEST_EXECUTABLES=OFF \
-          -G "Unix Makefiles" ..
+  cmake -DCMAKE_BUILD_TYPE=Release "${COMMON_FLAGS[@]}" ..
 fi
 
-# Build Z3
-make -j$(nproc)
+make -j"$(cpu_count)" >&2
 
-# Remove unnecessary library to save space (saves ~1.3GB)
-if [ -f "libz3.a" ]; then
-    echo "🗑️  Removing libz3.a to save space..."
-    rm -f libz3.a
+BINARY_PATH="$SOLVER_ROOT/build/z3"
+if [[ ! -x "$BINARY_PATH" ]]; then
+  echo "Expected executable not found: $BINARY_PATH" >&2
+  exit 1
 fi
 
-# Install to system
-sudo make install
-
-echo "🧪 Testing Z3 binary..."
-# Test the Z3 binary
-if [ -f "./z3" ]; then
-    ./z3 --version || echo "Version command completed (exit code $?)"
-    echo "Z3 binary is working correctly!"
-else
-    echo "Z3 binary not found!"
-    exit 1
-fi
-
-echo "✅ Z3 build and test completed successfully!"
+printf 'BINARY_PATH=%s\n' "$(cd "$(dirname "$BINARY_PATH")" && pwd)/$(basename "$BINARY_PATH")"

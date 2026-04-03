@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run the orchestrator-backed OpenSMT commit harness."""
+"""Run the contract-driven OpenSMT commit harness."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -13,17 +12,14 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.commit_harness_runner import (  # noqa: E402
-    build_opensmt_targets,
-    ensure_command_available,
-    run_commit_harness,
-)
+from scripts.solver_fuzzing_brain import run_contract_harness  # noqa: E402
+
+
+CONTRACT_PATH = ROOT / "contracts" / "solvers" / "opensmt.yml"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run the orchestrator-backed OpenSMT commit harness"
-    )
+    parser = argparse.ArgumentParser(description="Run the contract-driven OpenSMT commit harness")
     parser.add_argument("--tests-json", required=True)
     parser.add_argument("--job-id")
     parser.add_argument("--tests-root", default="test/regression")
@@ -37,14 +33,14 @@ def main() -> int:
     parser.add_argument("--opensmt-path", default="./build/bin/opensmt")
     parser.add_argument("--cvc5-path", default="cvc5")
     parser.add_argument("--strict", action="store_true")
-
     args = parser.parse_args()
-    ensure_command_available(args.opensmt_path, "opensmt")
-    ensure_command_available(args.cvc5_path, "cvc5")
 
-    return run_commit_harness(
-        tests=json.loads(args.tests_json),
+    return run_contract_harness(
+        CONTRACT_PATH,
+        tests=args.tests_json,
         tests_root=args.tests_root,
+        target_binary=args.opensmt_path,
+        reference_binary=args.cvc5_path,
         bugs_folder=args.bugs_folder,
         num_workers=args.workers,
         iterations=args.iterations,
@@ -52,7 +48,6 @@ def main() -> int:
         time_remaining=args.time_remaining,
         job_start_time=args.job_start_time,
         stop_buffer_minutes=args.stop_buffer_minutes,
-        targets=build_opensmt_targets(args.cvc5_path, args.opensmt_path),
         job_id=args.job_id,
         strict_mode=args.strict,
     )

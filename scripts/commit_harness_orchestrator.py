@@ -17,7 +17,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import psutil
+try:
+    import psutil
+except Exception:  # pragma: no cover - lightweight environments may omit psutil
+    psutil = None  # type: ignore[assignment]
 
 
 class CommitHarnessRunner:
@@ -104,31 +107,61 @@ class CommitHarnessRunner:
         self.shutdown_event = multiprocessing.Event()
         self.strict_exit_code = multiprocessing.Value('i', 0)
         self.strict_lock = multiprocessing.Lock()
-
-        self.resource_state = multiprocessing.Manager().dict({
-            'cpu_percent': [0.0] * self.cpu_count,
-            'memory_percent': 0.0,
-            'status': 'normal',
-            'paused': False,
-            'last_update': time.time(),
-        })
         self.resource_lock = multiprocessing.Lock()
+        self.manager = None
+        self.single_process_mode = False
 
-        # Track which test each worker is currently processing (worker_id ->
-        # test_name)
-        self.current_tests = multiprocessing.Manager().dict()
+        if self.num_workers <= 1:
+            self.single_process_mode = True
+        else:
+            try:
+                self.manager = multiprocessing.Manager()
+            except Exception:
+                # Some sandboxed environments disallow Manager sockets. Keep a
+                # serial fallback path for lightweight tests and local debugging.
+                self.single_process_mode = True
 
-        self.stats = multiprocessing.Manager().dict({
-            'tests_processed': 0,
-            'bugs_found': 0,
-            'tests_removed_unsupported': 0,
-            'tests_removed_timeout': 0,
-            'tests_requeued': 0,
-        })
+        if self.manager is not None:
+            self.resource_state = self.manager.dict({
+                'cpu_percent': [0.0] * self.cpu_count,
+                'memory_percent': 0.0,
+                'status': 'normal',
+                'paused': False,
+                'last_update': time.time(),
+            })
+
+            # Track which test each worker is currently processing
+            self.current_tests = self.manager.dict()
+
+            self.stats = self.manager.dict({
+                'tests_processed': 0,
+                'bugs_found': 0,
+                'tests_removed_unsupported': 0,
+                'tests_removed_timeout': 0,
+                'tests_requeued': 0,
+            })
+        else:
+            self.resource_state = {
+                'cpu_percent': [0.0] * self.cpu_count,
+                'memory_percent': 0.0,
+                'status': 'normal',
+                'paused': False,
+                'last_update': time.time(),
+            }
+            self.current_tests = {}
+            self.stats = {
+                'tests_processed': 0,
+                'bugs_found': 0,
+                'tests_removed_unsupported': 0,
+                'tests_removed_timeout': 0,
+                'tests_requeued': 0,
+            }
 
     @staticmethod
     def _cpu_count() -> int:
         """Return the available CPU core count with a safe fallback."""
+        if psutil is None:
+            return os.cpu_count() or 1
         count = psutil.cpu_count()
         if count:
             return count
@@ -197,6 +230,11 @@ class CommitHarnessRunner:
 
     def _monitor_resources(self):
         """Continuously sample resources and trigger protective actions."""
+        if psutil is None:
+            while not self.shutdown_event.is_set():
+                time.sleep(self.RESOURCE_CONFIG['check_interval'])
+            return
+
         while not self.shutdown_event.is_set():
             try:
                 cpu_percent = psutil.cpu_percent(interval=1, percpu=True)
@@ -266,6 +304,9 @@ class CommitHarnessRunner:
         Uses recursive descendant tracking to catch orphaned worker
         subprocesses.
         """
+        if psutil is None:
+            return
+
         if threshold_mb is None:
             threshold_mb = self.RESOURCE_CONFIG['max_process_memory_mb']
 
@@ -367,6 +408,8 @@ class CommitHarnessRunner:
 
     def _get_all_descendant_pids(self, pid):
         """Return all descendant process IDs for `pid`."""
+        if psutil is None:
+            return set()
         descendant_pids = set()
         try:
             proc = psutil.Process(pid)
@@ -381,6 +424,8 @@ class CommitHarnessRunner:
 
     def _log_cpu_usage_by_process_type(self):
         """Log tracked CPU and RAM usage grouped by process role."""
+        if psutil is None:
+            return
         try:
             main_pid = os.getpid()
             worker_pids = set()
@@ -787,10 +832,16 @@ class CommitHarnessRunner:
         return [self._resolve_target_command(
             identifier) for identifier in target_identifiers]
 
-    def _parse_harness_template(self, harness: Optional[str]) -> List[str]:
+    def _parse_harness_template(self, harness: Optional[str | List[str]]) -> List[str]:
         """Parse and validate the harness command template JSON."""
         if harness is None:
             raise ValueError("Harness template is required")
+
+        if isinstance(harness, list):
+            if not harness or not all(isinstance(item, str) for item in harness):
+                raise ValueError("--harness list must contain only argv strings")
+            return harness
+
         raw = harness.strip()
         if not raw:
             raise ValueError("Harness template cannot be empty")
@@ -893,7 +944,14 @@ class CommitHarnessRunner:
         """Return all bug artifact files under `folder`."""
         if not folder.exists():
             return []
-        return sorted([path for path in folder.rglob("*") if path.is_file()])
+        bug_files = []
+        for path in folder.rglob("*"):
+            if not path.is_file():
+                continue
+            if any(part.startswith(".") for part in path.relative_to(folder).parts):
+                continue
+            bug_files.append(path)
+        return sorted(bug_files)
 
     @contextlib.contextmanager
     def _worker_temp_dirs(self, worker_id: int):
@@ -1141,6 +1199,49 @@ class CommitHarnessRunner:
 
         print(f"[WORKER {worker_id}] Stopped")
 
+    def _run_serial(self) -> int:
+        """Run the harness loop without multiprocessing.Manager support."""
+        pending_tests = list(self.tests)
+        worker_id = 1
+
+        print("[INFO] Running commit harness in serial fallback mode")
+
+        while pending_tests and not self.shutdown_event.is_set():
+            if self._is_time_expired():
+                break
+
+            test_name = pending_tests.pop(0)
+            self.current_tests[worker_id] = test_name
+            time_remaining = self._get_time_remaining()
+            exit_code, bug_files, runtime = self._run_harness(
+                test_name,
+                worker_id,
+                per_test_timeout=time_remaining
+                if self.time_remaining and time_remaining > 0 else None,
+            )
+            self.current_tests.pop(worker_id, None)
+
+            action = self._handle_exit_code(
+                test_name,
+                exit_code,
+                bug_files,
+                runtime,
+                worker_id,
+            )
+
+            if action == 'requeue':
+                pending_tests.append(test_name)
+                self.stats['tests_requeued'] += 1
+
+            self.stats['tests_processed'] += 1
+
+            if self.strict_mode and self.shutdown_event.is_set():
+                break
+
+        if self.strict_mode:
+            return self.strict_exit_code.value
+        return self.EXIT_CODE_SUCCESS
+
     def run(self) -> int:
         """Start workers, monitor execution, and print the final summary."""
         if not self.tests:
@@ -1174,6 +1275,9 @@ class CommitHarnessRunner:
              if self.target_commands else "(none)"))
         print(f"Harness template: {self.harness_template}")
         print()
+
+        if self.single_process_mode:
+            return self._run_serial()
 
         for test in self.tests:
             self.test_queue.put(test)

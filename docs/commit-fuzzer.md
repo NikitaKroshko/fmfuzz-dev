@@ -1,39 +1,83 @@
 ### Commit Fuzzer
 
-### Components
-- GitHelper: commit metadata, `git show` diff, file blobs at commits.
-- PrepareCommitAnalyzer: identifies changed functions and resolves covering tests.
-- Matcher: looks up functions in the coverage map and returns tests.
+### Architecture
+- The shared logic lives in `scripts/solver_fuzzing_brain.py`.
+- Solver metadata lives in one YAML contract under `contracts/solvers/`.
+- Solver repositories provide thin entrypoints:
+  - `build.sh`
+  - `test.sh`
+  - a thin workflow wrapper
+- Solver-specific Python routes should not be added to the shared brain.
 
-### Inputs
-- Commit SHA to analyze
-- Coverage map: `coverage_mapping.json(.gz)`
-- Build tree for parsing (e.g., `compile_commands.json`)
+### Contract
+- Source of truth: `contracts/solvers/<solver>.yml`
+- Required fields:
+  - `solver_name`
+  - `repository_url`
+  - `repository_path`
+  - `build_command`
+  - `coverage_build_command`
+  - `production_binary_path`
+  - `coverage_binary_path`
+  - one of `test_discovery_command` or `test_root`
+  - `target_commands`
+- Optional fields:
+  - `issues_url`
+  - `tests_repository_url`
+  - `tests_repository_path`
+  - `oracle_command`
+  - `environment_requirements`
+  - `artifact_paths`
+  - `artifact_s3_bucket`
+  - `artifact_s3_prefix`
 
-### Outputs
-- For each commit: changed functions with test sets (and unmatched functions)
-- Aggregate stats across commits (totals and overall coverage)
+### Script Contracts
+- `build.sh`
+  - no arguments: production build
+  - `--instrumentation`: coverage or instrumented build
+  - `--coverage`: compatibility alias
+  - final stdout line must be `BINARY_PATH=/abs/path/to/binary`
+- `test.sh`
+  - `--discover` prints newline-separated test paths or stable identifiers
+  - output must be machine-readable on stdout
+  - logs belong on stderr
 
-### Algorithm
-1) Diff parsing (new-side line ranges)
-   - Run: `git show -U0 --no-color <sha>`.
-   - For each hunk header `@@ -<old>[,<n>] +<new>[,<m>] @@`:
-     - Initialize `new_line = <new>`.
-     - For each following line until next header:
-       - If line starts with `+` (and not `+++`), record `new_line` as changed; increment `new_line`.
-       - If context line (neither `+` nor `-`), increment `new_line`.
-     - Associate recorded new-side lines with the current `+++ b/<path>` file.
+### Brain Responsibilities
+1. Load and validate the YAML contract.
+2. Resolve same-repo or split-repo workspaces.
+3. Check out solver and optional test repositories.
+4. Run production or coverage builds through the contract.
+5. Parse `BINARY_PATH=...` and verify the binary exists and is executable.
+6. Discover tests through `test_discovery_command` or `test_root`.
+7. Run the shared commit harness with contract-provided target commands.
+8. Run the oracle if the contract defines one.
+9. Collect local artifacts and optionally upload them to S3.
 
-2) Function selection (AST overlap)
-   - For each changed C/C++ file:
-     - Parse with libclang (prefer arguments from `compile_commands.json`).
-     - Traverse functions/methods; keep only definitions.
-     - Select those whose source extent overlaps any changed line.
-     - If multiple functions cover a line, choose the innermost (smallest span).
-     - Move detection: for the same function (stable key = signature without `:line`) that exists in the parent commit, compare normalized bodies (strip comments, collapse whitespace) between parent and target extents; if identical, classify as a pure move and skip.
-     - Build function IDs as `path:demangled_signature:start_line` using `cursor.mangled_name` + `c++filt`.
+### Onboarding A New Solver
+1. Add `contracts/solvers/<solver>.yml`.
+2. Add or adapt `scripts/<solver>/build.sh`.
+3. Add or adapt `scripts/<solver>/test.sh`.
+4. Add a thin workflow wrapper that points to the contract.
+5. If the solver needs commit-selection or coverage-specific helpers, keep them outside the shared brain.
 
-3) Coverage lookup
-   - Direct: exact `path:signature:line` match in coverage map.
-   - Pathless: drop `:line` (requires identical signature).
-   - If still unmatched, emit fuzzy candidates (do not count as covered).
+### Errors
+- Contract failures are explicit and fail fast.
+- Error messages include:
+  - solver name
+  - repository URL
+  - step name
+  - exact command
+  - exit code
+  - artifact or log location
+  - issue tracker URL when available
+- GitHub issue URLs are derived automatically when `issues_url` is omitted.
+
+### Artifacts
+- Local artifact collection always runs.
+- S3 upload is optional and contract-driven.
+- Upload failures do not hide the underlying local result.
+- Hidden sentinel files inside worker bug folders are ignored and are not treated as bug artifacts.
+
+### Current Baseline
+- `cvc5` is the reference contract and parity target.
+- `z3` and `opensmt` use the same shared brain with solver-specific metadata and thin wrappers only.

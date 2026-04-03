@@ -363,13 +363,19 @@ index 1111111..2222222 100644
         self.assertIn("name: coverage-mapping", join_block)
         self.assertIn("path: coverage_mapping.json.gz", join_block)
 
-    def test_build_workflows_use_deterministic_build_queue_checks(self) -> None:
+    def test_build_workflows_delegate_to_shared_contract_driven_build_workflow(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
+        reusable_text = (repo_root / ".github" / "workflows" / "solver-build.yml").read_text(encoding="utf-8")
+
+        self.assertIn('python3 scripts/scheduling/check_build_queue.py "${{ inputs.solver_name }}"', reusable_text)
+        self.assertIn("scripts/solver_fuzzing_brain.py", reusable_text)
+        self.assertNotIn("tail -1", reusable_text)
 
         for workflow_name, solver in [("z3.yml", "z3"), ("cvc5.yml", "cvc5"), ("opensmt.yml", "opensmt")]:
             workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
-            self.assertIn(f"python3 scripts/scheduling/check_build_queue.py {solver}", workflow_text)
-            self.assertNotIn("tail -1", workflow_text)
+            self.assertIn("uses: ./.github/workflows/solver-build.yml", workflow_text)
+            self.assertIn(f"solver_name: {solver}", workflow_text)
+            self.assertIn(f"contract_path: contracts/solvers/{solver}.yml", workflow_text)
 
     def test_coverage_mapper_workflows_propagate_resolved_commit_hash(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -385,12 +391,13 @@ index 1111111..2222222 100644
             self.assertIn('COMMIT_HASH="${{ needs.discover-tests.outputs.commit_hash }}"', workflow_text)
             self.assertNotIn("steps.get-commit.outputs.commit_hash", workflow_text)
 
-    def test_opensmt_commit_and_regression_workflows_use_wrappers(self) -> None:
+    def test_opensmt_commit_and_regression_workflows_use_contract_brain(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
 
         commit_fuzzer_text = (repo_root / ".github" / "workflows" / "opensmt-commit-fuzzer.yml").read_text(encoding="utf-8")
         regression_text = (repo_root / ".github" / "workflows" / "opensmt-regression.yml").read_text(encoding="utf-8")
-        self.assertIn("run_simple_fuzzer.sh", commit_fuzzer_text)
+        self.assertIn("scripts/solver_fuzzing_brain.py", commit_fuzzer_text)
+        self.assertIn("contracts/solvers/opensmt.yml", commit_fuzzer_text)
         self.assertIn("run_regression_tests.sh", regression_text)
 
     def test_cache_backed_upstream_workflows_persist_sha_after_successful_build(self) -> None:

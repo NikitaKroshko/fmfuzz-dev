@@ -11,7 +11,7 @@ from scripts.scheduling.s3_state import S3StateError, get_state_manager
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check if a commit is still present in the build queue")
-    parser.add_argument("solver", choices=["z3", "cvc5", "opensmt"], help="Solver name")
+    parser.add_argument("solver", help="Solver name")
     parser.add_argument("commit", help="Commit hash to check")
     args = parser.parse_args()
 

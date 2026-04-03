@@ -7,19 +7,18 @@ on:
   workflow_dispatch:
     inputs:
       cvc5_commit_hash:
-        description: 'Optional: CVC5 commit hash to fuzz (defaults to upstream HEAD)'
+        description: "Optional: CVC5 commit hash to fuzz (defaults to upstream HEAD)"
         required: false
         type: string
       stop_buffer_minutes:
-        description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
+        description: "Optional: Minutes before timeout to stop fuzzing (default: 5)"
         required: false
         type: number
         default: 5
   schedule:
-    - cron: '45 0,5,10,15,20 * * *'
+    - cron: "45 0,5,10,15,20 * * *"
 
 concurrency:
-  # Keep scheduled and manual runs from canceling each other.
   group: ${{ github.workflow }}-${{ github.event_name }}
   cancel-in-progress: true
 
@@ -40,123 +39,93 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install system dependencies
+      - name: Install base tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            libc6-dev \
-            gcc \
-            g++ \
-            binutils \
-            libstdc++-14-dev \
-            libc++-dev \
-            libc++abi-dev \
-            jq \
-            zlib1g \
-            zlib1g-dev \
-            unzip
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get install -y jq
+          pip install psutil requests antlr4-python3-runtime==4.9.2 "yinyang==0.3.0"
 
-      - name: Install Python dependencies
+      - name: Install contract system dependencies
         run: |
-          pip install psutil antlr4-python3-runtime==4.9.2
-          git clone https://github.com/testsmt/yinyang.git
-          cd yinyang
-          pip install -e .
-          cd ..
-
-      - name: Clone CVC5 repository
-        run: |
-          if [ -d "cvc5" ]; then
-            echo "CVC5 directory already exists, skipping clone"
-          else
-            git clone https://github.com/cvc5/cvc5.git cvc5
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
           fi
 
-      - name: Fetch CVC5 refs
-        working-directory: cvc5
-        run: git fetch --all --tags
-
-      - name: Checkout CVC5 commit
-        if: inputs.cvc5_commit_hash != ''
-        working-directory: cvc5
+      - name: Checkout CVC5 workspace
         run: |
-          git checkout ${{ inputs.cvc5_commit_hash }}
-          echo "Checked out commit: $(git rev-parse HEAD)"
-
-      - name: Record CVC5 commit hash
-        id: get-commit
-        working-directory: cvc5
-        run: |
-          echo "commit_hash=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "CVC5 commit hash: $(git rev-parse HEAD)"
-
-      - name: Build CVC5 static binary
-        run: bash "${{ github.workspace }}/scripts/cvc5/build.sh" --static
-
-      - name: Clone Z3 repository
-        run: |
-          if [ -d "z3" ]; then
-            echo "Z3 directory already exists, skipping clone"
-          else
-            git clone https://github.com/Z3Prover/z3.git z3
+          CHECKOUT_ARGS=()
+          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+            CHECKOUT_ARGS+=(--commit-hash "${{ inputs.cvc5_commit_hash }}")
           fi
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            checkout \
+            "${CHECKOUT_ARGS[@]}" \
+            --json > cvc5-checkout.json
 
-      - name: Fetch Z3 refs
-        working-directory: z3
-        run: git fetch --all --tags
-
-      - name: Build Z3 static binary
+      - name: Checkout and build Z3 reference binary
         run: |
-          bash "${{ github.workspace }}/scripts/z3/build.sh" --static
-          echo "${{ github.workspace }}/z3/build" >> "$GITHUB_PATH"
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/z3.yml \
+            checkout \
+            --json > z3-checkout.json
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/z3.yml \
+            build \
+            --mode production \
+            --json > z3-build.json
+
+      - name: Build CVC5 target binary
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            build \
+            --mode production \
+            --json > cvc5-build.json
 
       - name: Generate local test set
-        id: build-matrix
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: |
-          python3 scripts/local_commit_fuzzer_matrix.py cvc5 \
-            --build-dir cvc5/build \
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            matrix \
             --limit-tests "${LOCAL_TEST_LIMIT}" \
             --max-jobs 1 \
             --output matrix.json
 
+      - name: Run local commit fuzzer
+        run: |
           TEST_COUNT=$(jq -r '.total_tests' matrix.json)
           if [ "$TEST_COUNT" = "0" ]; then
             echo "No tests discovered"
-            echo "tests_json=[]" >> "$GITHUB_OUTPUT"
-            echo "test_count=0" >> "$GITHUB_OUTPUT"
-          else
-            TESTS_JSON=$(jq -c '.matrix.include[0].tests' matrix.json)
-            echo "tests_json=$TESTS_JSON" >> "$GITHUB_OUTPUT"
-            echo "test_count=$TEST_COUNT" >> "$GITHUB_OUTPUT"
-            echo "Selected $TEST_COUNT tests"
+            exit 0
           fi
 
-      - name: Run local commit fuzzer
-        if: steps.build-matrix.outputs.test_count != '0'
-        working-directory: cvc5
-        env:
-          TESTS_JSON: ${{ steps.build-matrix.outputs.tests_json }}
-        run: |
-          mkdir -p ../logs ../bugs
+          TESTS_JSON=$(jq -c '.matrix.include[0].tests' matrix.json)
+          TARGET_BINARY=$(jq -r '.binary_path' cvc5-build.json)
+          REFERENCE_BINARY=$(jq -r '.binary_path' z3-build.json)
           STOP_BUFFER="${{ inputs.stop_buffer_minutes || 5 }}"
 
+          mkdir -p logs bugs
           set -o pipefail
-          "${{ github.workspace }}/scripts/cvc5/commit_fuzzer/simple_commit_fuzzer.py" \
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            run-harness \
             --tests-json "$TESTS_JSON" \
-            --job-id 'cvc5-local' \
-            --tests-root 'test/regress/cli' \
+            --job-id "cvc5-local" \
             --job-start-time "$JOB_START" \
             --stop-buffer-minutes "$STOP_BUFFER" \
             --iterations 250 \
-            --cvc5-path ./build/bin/cvc5 \
-            |& tee "../logs/cvc5-fuzzer.log"
+            --target-binary "$TARGET_BINARY" \
+            --reference-binary "$REFERENCE_BINARY" \
+            --bugs-folder bugs \
+            |& tee logs/cvc5-fuzzer.log
 
       - name: Upload local matrix
         if: always()
@@ -180,6 +149,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-bugs
-          path: cvc5/bugs
+          path: bugs
           retention-days: 1
           if-no-files-found: ignore
