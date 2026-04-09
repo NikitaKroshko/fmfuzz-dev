@@ -105,6 +105,14 @@ class BuildResult:
     log_path: Optional[Path]
 
 
+@dataclass(frozen=True)
+class ArtifactResult:
+    artifact_dir: Optional[Path]
+    artifact_archive: Optional[Path]
+    upload_target: Optional[str]
+    warnings: tuple[str, ...]
+
+
 TYPEFUZZ_HARNESS_TEMPLATE = [
     "typefuzz",
     "-i",
@@ -617,6 +625,58 @@ class SolverFuzzingBrain:
 
         return f"s3://{bucket}/{key}"
 
+    def collect_existing_artifacts(
+        self,
+        *,
+        artifacts_dir: Optional[str | Path] = None,
+        artifact_archive: Optional[str | Path] = None,
+        upload_s3: bool = False,
+        s3_bucket: Optional[str] = None,
+        s3_prefix: Optional[str] = None,
+    ) -> ArtifactResult:
+        self._ensure_workspace_exists()
+
+        artifact_dir_path = Path(artifacts_dir).resolve() if artifacts_dir else None
+        if artifact_dir_path:
+            shutil.rmtree(artifact_dir_path, ignore_errors=True)
+            artifact_dir_path.mkdir(parents=True, exist_ok=True)
+
+        warnings: List[str] = []
+        if artifact_dir_path:
+            warnings.extend(self.collect_artifacts(artifact_dir_path))
+
+        archive_path: Optional[Path] = None
+        if artifact_dir_path and artifact_archive:
+            archive_path = Path(artifact_archive).resolve()
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            self.create_artifact_archive(artifact_dir_path, archive_path)
+
+        upload_target = None
+        if upload_s3:
+            if archive_path is None:
+                raise BrainError(
+                    solver_name=self.contract.solver_name,
+                    repository_url=self.contract.repository_url,
+                    step="artifact upload",
+                    message="cannot upload artifacts because no archive was created",
+                    issues_url=self.contract.resolved_issues_url,
+                    hint="pass both --artifacts-dir and --artifact-archive before enabling S3 upload",
+                    category="artifact problem",
+                )
+            upload_target = self.upload_to_s3(
+                archive_path,
+                bucket=s3_bucket or self.contract.artifact_s3_bucket,
+                prefix=s3_prefix if s3_prefix is not None else self.contract.artifact_s3_prefix,
+                step="artifact upload",
+            )
+
+        return ArtifactResult(
+            artifact_dir=artifact_dir_path,
+            artifact_archive=archive_path,
+            upload_target=upload_target,
+            warnings=tuple(warnings),
+        )
+
     def _checkout_repository(
         self,
         *,
@@ -1044,6 +1104,17 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--s3-prefix", default=None)
     build.add_argument("--json", action="store_true")
 
+    collect = subparsers.add_parser(
+        "collect-artifacts",
+        help="Collect contract-declared artifacts from an existing workspace and optionally archive them",
+    )
+    collect.add_argument("--artifacts-dir", required=True)
+    collect.add_argument("--artifact-archive", default=None)
+    collect.add_argument("--upload-s3", action="store_true")
+    collect.add_argument("--s3-bucket", default=None)
+    collect.add_argument("--s3-prefix", default=None)
+    collect.add_argument("--json", action="store_true")
+
     discover = subparsers.add_parser("discover-tests", help="Run contract-driven test discovery")
     discover.add_argument("--log-path", default=None)
     discover.add_argument("--json", action="store_true")
@@ -1164,6 +1235,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
                 print(f"BINARY_PATH={result.binary_path}")
+            return 0
+
+        if args.command == "collect-artifacts":
+            result = brain.collect_existing_artifacts(
+                artifacts_dir=args.artifacts_dir,
+                artifact_archive=args.artifact_archive,
+                upload_s3=args.upload_s3,
+                s3_bucket=args.s3_bucket,
+                s3_prefix=args.s3_prefix,
+            )
+            payload = {
+                "artifact_archive": str(result.artifact_archive) if result.artifact_archive else None,
+                "artifact_dir": str(result.artifact_dir) if result.artifact_dir else None,
+                "solver_name": brain.contract.solver_name,
+                "upload_target": result.upload_target,
+                "warnings": list(result.warnings),
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            elif result.artifact_archive:
+                print(result.artifact_archive)
             return 0
 
         if args.command == "discover-tests":

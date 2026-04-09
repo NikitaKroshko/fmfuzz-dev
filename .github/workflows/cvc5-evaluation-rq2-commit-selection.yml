@@ -27,13 +27,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
+      - name: Read CVC5 contract
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+
       - name: Clone CVC5 repository
         run: |
+          REPO_URL=$(python3 -c "import json; print(json.load(open('contract.json'))['repository_url'])")
           if [ -d "cvc5" ]; then
             cd cvc5
             git fetch origin
           else
-            git clone https://github.com/cvc5/cvc5.git cvc5
+            git clone "$REPO_URL" cvc5
           fi
       
       - name: Set up Python
@@ -58,9 +66,10 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO_URL=$(python3 -c "import json; print(json.load(open('contract.json'))['repository_url'])")
           CMD="python3 scripts/evaluation/rq2/commit_selection.py \
             cvc5 \
-            https://github.com/cvc5/cvc5.git \
+            $REPO_URL \
             --years 2 \
             --token $GITHUB_TOKEN \
             --repo-path cvc5"
@@ -82,4 +91,3 @@ jobs:
           fi
           
           eval $CMD
-

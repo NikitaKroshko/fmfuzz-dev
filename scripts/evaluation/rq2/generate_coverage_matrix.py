@@ -7,7 +7,23 @@ import json
 import boto3
 import subprocess
 import shutil
+import tarfile
 from botocore.exceptions import ClientError
+
+
+def _archive_contains_prefix(artifact_path: str, prefix: str) -> bool:
+    with tarfile.open(artifact_path, "r:gz") as archive:
+        normalized = prefix.rstrip("/") + "/"
+        for member in archive.getnames():
+            if member == prefix.rstrip("/") or member.startswith(normalized):
+                return True
+    return False
+
+
+def _extract_generic_archive(artifact_path: str, destination_root: str) -> None:
+    os.makedirs(destination_root, exist_ok=True)
+    with tarfile.open(artifact_path, "r:gz") as archive:
+        archive.extractall(destination_root)
 
 def main():
     solver = sys.argv[1]
@@ -92,17 +108,20 @@ def main():
 
         subprocess.run(['git', '-C', 'opensmt', 'checkout', first_commit], check=True)
 
-    # Extract binary after the repository checkout so we do not overwrite the repo root
-    os.makedirs(build_dir, exist_ok=True)
-
-    extract_script = f"scripts/{solver}/extract_build_artifacts.sh"
-    result = subprocess.run(
-        ['bash', extract_script, 'artifacts/artifacts.tar.gz', build_dir, 'true'],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-    print(result.stdout, file=sys.stderr)
+    artifact_path = 'artifacts/artifacts.tar.gz'
+    if _archive_contains_prefix(artifact_path, 'build'):
+        _extract_generic_archive(artifact_path, solver_dir)
+        print(f"📦 Extracted contract archive into {solver_dir}", file=sys.stderr)
+    else:
+        os.makedirs(build_dir, exist_ok=True)
+        extract_script = f"scripts/{solver}/extract_build_artifacts.sh"
+        result = subprocess.run(
+            ['bash', extract_script, artifact_path, build_dir, 'true'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        print(result.stdout, file=sys.stderr)
 
     if solver == 'opensmt':
         # The repo checkout above is used for discovering the corpus ordering.

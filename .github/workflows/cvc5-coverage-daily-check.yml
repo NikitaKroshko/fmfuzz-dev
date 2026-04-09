@@ -1,7 +1,7 @@
 name: CVC5 Coverage Daily Check
 
 on:
-  workflow_dispatch:  # Allow manual triggering for testing
+  workflow_dispatch:
 
 jobs:
   check-rebuild-needed:
@@ -16,28 +16,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Checkout CVC5 repository
-        run: |
-          if [ -d "cvc5" ]; then
-            cd cvc5
-            git fetch origin
-          else
-            git clone https://github.com/cvc5/cvc5.git cvc5
-            cd cvc5
-          fi
-
-      - name: Configure CMake (for ctest discovery)
-        run: |
-          cd cvc5
-          ./configure.sh production --auto-download
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install Python dependencies
-        run: pip install boto3 psutil
+      - name: Install tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          pip install boto3 psutil
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Checkout CVC5 workspace
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            checkout \
+            --json > checkout.json
+
+      - name: Build CVC5 for test counting
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            build \
+            --mode production \
+            --json > cvc5-build.json
 
       - name: Count tests
         id: count-tests
@@ -49,8 +60,8 @@ jobs:
           TEST_COUNT=$(jq -r '.test_count' test-count.json)
           COMMIT_HASH=$(jq -r '.commit_hash' test-count.json)
 
-          echo "test_count=$TEST_COUNT" >> $GITHUB_OUTPUT
-          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "test_count=$TEST_COUNT" >> "$GITHUB_OUTPUT"
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
 
           echo "✅ Found $TEST_COUNT tests at commit ${COMMIT_HASH:0:8}"
 
@@ -75,8 +86,8 @@ jobs:
           SHOULD_REBUILD=$(jq -r '.should_rebuild' decision.json)
           REASON=$(jq -r '.reason' decision.json)
 
-          echo "should_rebuild=$SHOULD_REBUILD" >> $GITHUB_OUTPUT
-          echo "reason=$REASON" >> $GITHUB_OUTPUT
+          echo "should_rebuild=$SHOULD_REBUILD" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
 
           if [ "$SHOULD_REBUILD" = "true" ]; then
             echo "✅ Decision: REBUILD - $REASON"

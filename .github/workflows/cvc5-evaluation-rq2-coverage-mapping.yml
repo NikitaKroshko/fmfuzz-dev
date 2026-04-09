@@ -91,10 +91,12 @@ jobs:
           aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY artifacts/artifacts.tar.gz
           echo "✅ Downloaded coverage binary for $COMMIT_HASH"
       
-      - name: Extract coverage binary
+      - name: Extract coverage artifact archive
         run: |
-          mkdir -p cvc5/build
-          ./scripts/cvc5/extract_build_artifacts.sh artifacts/artifacts.tar.gz cvc5/build true
+          mkdir -p cvc5
+          tar -xzf artifacts/artifacts.tar.gz -C cvc5
+          test -x cvc5/build/bin/cvc5
+          test -f cvc5/build/compile_commands.json
       
       - name: Set up Python
         uses: actions/setup-python@v5

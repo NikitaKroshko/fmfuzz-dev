@@ -4,83 +4,51 @@ on:
   workflow_dispatch:
 
 jobs:
-
-  regress0:
+  regressions:
     runs-on: ubuntu-latest
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [regress0, regress1, regress2, regress3, regress4]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress0 tests with timing
-        run: |
-          cd cvc5/build
-          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress0
 
-  regress1:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress1 tests with timing
-        run: |
-          cd cvc5/build
-          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-  regress2:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
+      - name: Install tooling and contract dependencies
         run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress2 tests with timing
-        run: |
-          cd cvc5/build
-          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress2
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
 
-  regress3:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
+      - name: Checkout CVC5 workspace
         run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress3 tests with timing
-        run: |
-          cd cvc5/build
-          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress3
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            checkout \
+            --json > checkout.json
 
-  regress4:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
       - name: Build CVC5 with coverage
         run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress4 tests with timing
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            build \
+            --mode instrumentation \
+            --json > cvc5-build.json
+
+      - name: Run ${{ matrix.shard }} tests with timing
         run: |
           cd cvc5/build
-          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress4
+          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh "${{ matrix.shard }}"

@@ -15,8 +15,7 @@ from unittest.mock import patch
 from scripts.commit_harness_runner import build_opensmt_targets
 from scripts.diff_utils import parse_unified_diff
 from scripts.local_commit_fuzzer_matrix import discover_opensmt_tests
-from scripts.opensmt.commit_fuzzer import prepare_commit_fuzzer, simple_commit_fuzzer
-from scripts.opensmt.commit_fuzzer import run_commit_fuzzer
+from scripts.opensmt.commit_fuzzer import prepare_commit_fuzzer, run_commit_fuzzer
 
 
 class CommitHarnessTests(unittest.TestCase):
@@ -351,8 +350,12 @@ index 1111111..2222222 100644
         self.assertIn("uses: actions/upload-artifact@v4", join_block)
         self.assertIn("name: coverage-mapping", join_block)
         self.assertIn("path: coverage_mapping.json.gz", join_block)
+        self.assertIn("contracts/solvers/cvc5.yml", mapper_text)
+        self.assertIn("scripts/solver_fuzzing_brain.py", mapper_text)
         self.assertIn("name: coverage-mapping", analyzer_text)
         self.assertIn("gunzip coverage_mapping.json.gz", analyzer_text)
+        self.assertIn("contracts/solvers/cvc5.yml", analyzer_text)
+        self.assertIn("scripts/solver_fuzzing_brain.py", analyzer_text)
 
     def test_opensmt_coverage_mapper_publishes_final_artifact(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -380,16 +383,40 @@ index 1111111..2222222 100644
     def test_coverage_mapper_workflows_propagate_resolved_commit_hash(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
 
-        for workflow_name in [
-            "z3-coverage-mapper.yml",
-            "cvc5-coverage-mapper.yml",
-            "opensmt-coverage-mapper.yml",
-        ]:
+        workflow_expectations = {
+            "z3-coverage-mapper.yml": 'git checkout "${{ needs.discover-tests.outputs.commit_hash }}"',
+            "cvc5-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
+            "opensmt-coverage-mapper.yml": 'git checkout "${{ needs.discover-tests.outputs.commit_hash }}"',
+        }
+
+        for workflow_name, replay_step in workflow_expectations.items():
             workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
             self.assertIn("commit_hash: ${{ steps.resolve-commit.outputs.commit_hash }}", workflow_text)
-            self.assertIn('git checkout "${{ needs.discover-tests.outputs.commit_hash }}"', workflow_text)
+            self.assertIn(replay_step, workflow_text)
             self.assertIn('COMMIT_HASH="${{ needs.discover-tests.outputs.commit_hash }}"', workflow_text)
             self.assertNotIn("steps.get-commit.outputs.commit_hash", workflow_text)
+
+    def test_cvc5_workflows_use_contract_brain_and_drop_legacy_helpers(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        workflow_names = [
+            "cvc5-coverage-mapper.yml",
+            "cvc5-coverage-daily-check.yml",
+            "cvc5-regression.yml",
+            "cvc5-evaluation-rq2-build.yml",
+            "cvc5-commit-analyzer-test.yml",
+        ]
+        for workflow_name in workflow_names:
+            workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertIn("contracts/solvers/cvc5.yml", workflow_text)
+            self.assertIn("scripts/solver_fuzzing_brain.py", workflow_text)
+
+        rq2_build_text = (repo_root / ".github" / "workflows" / "cvc5-evaluation-rq2-build.yml").read_text(encoding="utf-8")
+        rq2_coverage_text = (repo_root / ".github" / "workflows" / "cvc5-evaluation-rq2-coverage-mapping.yml").read_text(encoding="utf-8")
+        self.assertIn("collect-artifacts", rq2_build_text)
+        self.assertNotIn("scripts/cvc5/collect_build_artifacts.sh", rq2_build_text)
+        self.assertNotIn("scripts/cvc5/extract_build_artifacts.sh", rq2_coverage_text)
+        self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C cvc5", rq2_coverage_text)
 
     def test_opensmt_commit_and_regression_workflows_use_contract_brain(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -399,6 +426,26 @@ index 1111111..2222222 100644
         self.assertIn("scripts/solver_fuzzing_brain.py", commit_fuzzer_text)
         self.assertIn("contracts/solvers/opensmt.yml", commit_fuzzer_text)
         self.assertIn("run_regression_tests.sh", regression_text)
+
+    def test_z3_and_opensmt_rq2_workflows_drop_legacy_artifact_helpers(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        z3_build_text = (repo_root / ".github" / "workflows" / "z3-evaluation-rq2-build.yml").read_text(encoding="utf-8")
+        z3_coverage_text = (repo_root / ".github" / "workflows" / "z3-evaluation-rq2-coverage-mapping.yml").read_text(encoding="utf-8")
+        opensmt_build_text = (repo_root / ".github" / "workflows" / "opensmt-evaluation-rq2-build.yml").read_text(encoding="utf-8")
+        opensmt_coverage_text = (repo_root / ".github" / "workflows" / "opensmt-evaluation-rq2-coverage-mapping.yml").read_text(encoding="utf-8")
+
+        self.assertIn("contracts/solvers/z3.yml", z3_build_text)
+        self.assertIn("collect-artifacts", z3_build_text)
+        self.assertNotIn("scripts/z3/collect_build_artifacts.sh", z3_build_text)
+        self.assertNotIn("scripts/z3/extract_build_artifacts.sh", z3_coverage_text)
+        self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C z3", z3_coverage_text)
+
+        self.assertIn("contracts/solvers/opensmt.yml", opensmt_build_text)
+        self.assertIn("collect-artifacts", opensmt_build_text)
+        self.assertNotIn("scripts/opensmt/collect_build_artifacts.sh", opensmt_build_text)
+        self.assertNotIn("scripts/opensmt/extract_build_artifacts.sh", opensmt_coverage_text)
+        self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C opensmt", opensmt_coverage_text)
 
     def test_cache_backed_upstream_workflows_persist_sha_after_successful_build(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -564,148 +611,6 @@ index 1111111..2222222 100644
             self.assertTrue((workdir / "bugs" / "open-smt-bug.smt2").exists())
             combined_output = stdout.getvalue() + stderr.getvalue()
             self.assertIn("[WORKER 1] ✓ Exit code 10: Found 1 bug(s) on seed.smt2", combined_output)
-
-    def test_opensmt_simple_commit_fuzzer_runs_to_completion(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp)
-            old_cwd = Path.cwd()
-            self.addCleanup(os.chdir, old_cwd)
-            os.chdir(workdir)
-
-            tests_root = workdir / "test" / "regression"
-            tests_root.mkdir(parents=True)
-            (tests_root / "seed.smt2").write_text("(check-sat)\n", encoding="utf-8")
-
-            bin_dir = workdir / "bin"
-            bin_dir.mkdir()
-            opensmt_build_bin = workdir / "build" / "bin"
-            opensmt_build_bin.mkdir(parents=True)
-
-            self._write_executable(
-                bin_dir / "typefuzz",
-                """\
-                #!/usr/bin/env python3
-                import sys
-                from pathlib import Path
-
-                def main() -> int:
-                    args = sys.argv[1:]
-                    bugs_dir = None
-                    for index, value in enumerate(args):
-                        if value == "--bugs" and index + 1 < len(args):
-                            bugs_dir = Path(args[index + 1])
-                            break
-                    if bugs_dir is None:
-                        return 2
-
-                    bugs_dir.mkdir(parents=True, exist_ok=True)
-                    sentinel = bugs_dir / ".seen"
-                    if sentinel.exists():
-                        return 3
-
-                    sentinel.write_text("seen\\n", encoding="utf-8")
-                    (bugs_dir / "open-smt-bug.smt2").write_text("(check-sat)\\n", encoding="utf-8")
-                    return 10
-
-                if __name__ == "__main__":
-                    raise SystemExit(main())
-                """,
-            )
-            self._write_executable(
-                bin_dir / "cvc5",
-                """\
-                #!/bin/sh
-                exit 0
-                """,
-            )
-            self._write_executable(
-                opensmt_build_bin / "opensmt",
-                """\
-                #!/bin/sh
-                exit 0
-                """,
-            )
-
-            path_env = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
-            tests_json = json.dumps(["seed.smt2"])
-            argv = [
-                "simple_commit_fuzzer.py",
-                "--tests-json",
-                tests_json,
-                "--tests-root",
-                "test/regression",
-                "--workers",
-                "1",
-                "--iterations",
-                "1",
-                "--modulo",
-                "1",
-                "--bugs-folder",
-                "bugs",
-                "--opensmt-path",
-                "./build/bin/opensmt",
-                "--cvc5-path",
-                "cvc5",
-            ]
-
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with (
-                patch.dict(os.environ, {"PATH": path_env}, clear=False),
-                patch.object(sys, "argv", argv),
-                redirect_stdout(stdout),
-                redirect_stderr(stderr),
-            ):
-                exit_code = simple_commit_fuzzer.main()
-
-            self.assertEqual(exit_code, 0)
-            self.assertTrue((workdir / "bugs" / "open-smt-bug.smt2").exists())
-            combined_output = stdout.getvalue() + stderr.getvalue()
-            self.assertIn("Running fuzzer on 1 test(s)", combined_output)
-            self.assertIn("Workers: 1", combined_output)
-            self.assertIn("Found 1 bug(s):", combined_output)
-            self.assertIn("Bug #1: bugs/open-smt-bug.smt2", combined_output)
-
-    def test_opensmt_simple_commit_fuzzer_counts_collected_bugs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp)
-            bin_dir = workdir / "bin"
-            bin_dir.mkdir()
-
-            self._write_executable(
-                bin_dir / "opensmt",
-                """\
-                #!/bin/sh
-                exit 0
-                """,
-            )
-            self._write_executable(
-                bin_dir / "cvc5",
-                """\
-                #!/bin/sh
-                exit 0
-                """,
-            )
-
-            fuzzer = simple_commit_fuzzer.SimpleCommitFuzzer(
-                tests=[],
-                tests_root=str(workdir / "tests"),
-                bugs_folder=str(workdir / "bugs"),
-                num_workers=1,
-                iterations=1,
-                modulo=1,
-                opensmt_path=str(bin_dir / "opensmt"),
-                cvc5_path=str(bin_dir / "cvc5"),
-            )
-
-            worker_bug_dir = workdir / "bugs" / "worker_1"
-            worker_bug_dir.mkdir(parents=True, exist_ok=True)
-            (worker_bug_dir / "seed-bug.smt2").write_text("(check-sat)\n", encoding="utf-8")
-
-            fuzzer._move_worker_bug_files()
-
-            self.assertTrue((workdir / "bugs" / "seed-bug.smt2").exists())
-            self.assertEqual(fuzzer._get_stat("bugs_found"), 1)
 
     def test_opensmt_prepare_commit_fuzzer_uses_commit_diff_and_matched_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

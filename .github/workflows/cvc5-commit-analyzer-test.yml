@@ -15,6 +15,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Checkout CVC5 workspace
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            checkout \
+            --json > checkout.json
       
       - name: Install LLVM/Clang 17
         uses: KyleMayes/install-llvm-action@v2
@@ -56,7 +81,11 @@ jobs:
           # Set environment variables to ensure clang uses GCC 14 toolchain
           export CXX="clang++ --gcc-toolchain=/usr"
           export CC="clang --gcc-toolchain=/usr"
-          ./scripts/cvc5/build.sh --coverage
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            build \
+            --mode instrumentation \
+            --json > cvc5-build.json
       
       - name: Download coverage map
         uses: dawidd6/action-download-artifact@v6

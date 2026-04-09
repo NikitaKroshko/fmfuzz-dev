@@ -14,6 +14,7 @@ from unittest.mock import patch
 from scripts.local_commit_fuzzer_matrix import discover_opensmt_tests
 from scripts.coverage.count_tests import count_opensmt_tests
 from scripts.opensmt.coverage.generate_matrix import generate_matrix
+from scripts.solver_fuzzing_brain import SolverFuzzingBrain
 
 
 class OpenSMTCoverageTests(unittest.TestCase):
@@ -405,19 +406,21 @@ class OpenSMTCoverageTests(unittest.TestCase):
             self.assertEqual(result["test_count"], 1)
             self.assertEqual(result["commit_hash"], head_commit)
 
-    def test_collect_build_artifacts_includes_installed_headers(self) -> None:
+    def test_contract_artifact_collection_uses_declared_opensmt_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             build_dir = tmp_path / "opensmt" / "build"
-            install_prefix = tmp_path / "install"
             output_dir = tmp_path / "artifacts"
 
             build_header_dir = build_dir / "include" / "opensmt"
-            install_header_dir = install_prefix / "include" / "opensmt"
+            src_header_dir = build_dir / "src" / "opensmt"
+            deps_header_dir = build_dir / "deps" / "api"
             build_header_dir.mkdir(parents=True)
-            install_header_dir.mkdir(parents=True)
+            src_header_dir.mkdir(parents=True)
+            deps_header_dir.mkdir(parents=True)
             (build_header_dir / "build_only.h").write_text("// build\n", encoding="utf-8")
-            (install_header_dir / "install_only.h").write_text("// install\n", encoding="utf-8")
+            (src_header_dir / "src_only.h").write_text("// src\n", encoding="utf-8")
+            (deps_header_dir / "deps_only.h").write_text("// deps\n", encoding="utf-8")
 
             bin_dir = build_dir / "bin"
             bin_dir.mkdir(parents=True)
@@ -426,23 +429,21 @@ class OpenSMTCoverageTests(unittest.TestCase):
             binary.chmod(0o755)
 
             (build_dir / "compile_commands.json").write_text("[]\n", encoding="utf-8")
-            (build_dir / "CMakeCache.txt").write_text(
-                f"CMAKE_INSTALL_PREFIX:PATH={install_prefix}\n",
-                encoding="utf-8",
+
+            repo_root = Path(__file__).resolve().parents[1]
+            brain = SolverFuzzingBrain(repo_root / "contracts" / "solvers" / "opensmt.yml", workspace_root=tmp_path)
+            result = brain.collect_existing_artifacts(
+                artifacts_dir=output_dir,
+                artifact_archive=tmp_path / "opensmt-artifacts.tar.gz",
             )
 
-            script = Path(__file__).resolve().parents[1] / "scripts" / "opensmt" / "collect_build_artifacts.sh"
-            subprocess.run(
-                ["bash", str(script), str(build_dir), str(output_dir)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
-            self.assertTrue((output_dir / "headers" / "include" / "opensmt" / "build_only.h").exists())
-            self.assertTrue((output_dir / "headers" / "include" / "opensmt" / "install_only.h").exists())
-            self.assertTrue((output_dir / "bin" / "opensmt").exists())
-            self.assertTrue((output_dir / "compile_commands.json").exists())
+            self.assertTrue((output_dir / "build" / "include" / "opensmt" / "build_only.h").exists())
+            self.assertTrue((output_dir / "build" / "src" / "opensmt" / "src_only.h").exists())
+            self.assertTrue((output_dir / "build" / "deps" / "api" / "deps_only.h").exists())
+            self.assertTrue((output_dir / "build" / "bin" / "opensmt").exists())
+            self.assertTrue((output_dir / "build" / "compile_commands.json").exists())
+            self.assertEqual(result.warnings, ())
+            self.assertTrue((tmp_path / "opensmt-artifacts.tar.gz").exists())
 
 
 if __name__ == "__main__":

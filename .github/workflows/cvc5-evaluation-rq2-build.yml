@@ -9,27 +9,27 @@ jobs:
     outputs:
       matrix: ${{ steps.generate-matrix.outputs.matrix }}
       total_commits: ${{ steps.generate-matrix.outputs.total_commits }}
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      
+          python-version: "3.12"
+
       - name: Install dependencies
         run: |
           pip install boto3
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      
+
       - name: Generate build matrix
         id: generate-matrix
         env:
@@ -38,10 +38,10 @@ jobs:
         run: |
           MATRIX=$(python3 scripts/evaluation/rq2/generate_build_matrix.py cvc5)
           COMMIT_COUNT=$(echo "$MATRIX" | python3 -c "import sys, json; data=json.load(sys.stdin); print(len(data['include']))")
-          
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "total_commits=$COMMIT_COUNT" >> $GITHUB_OUTPUT
-          
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "total_commits=$COMMIT_COUNT" >> "$GITHUB_OUTPUT"
+
           echo "✅ Generated matrix with $COMMIT_COUNT commits"
           echo "$MATRIX" | python3 -m json.tool
 
@@ -52,104 +52,116 @@ jobs:
       fail-fast: false
       max-parallel: 20
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
-    timeout-minutes: 60  # 1 hour
-    
+    timeout-minutes: 60
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      
-      - name: Prepare CVC5 for commit
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Prepare CVC5 workspace for commit
         run: |
           COMMIT_HASH="${{ matrix.commit }}"
           echo "🔨 Building commit: $COMMIT_HASH"
-          if [ -d "cvc5" ]; then
-            rm -rf cvc5
-          fi
-          git clone https://github.com/cvc5/cvc5.git cvc5
-          cd cvc5
-          git checkout $COMMIT_HASH
-          echo "Checked out commit: $(git rev-parse HEAD)"
-          cd ..
-      
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            checkout \
+            --commit-hash "$COMMIT_HASH" \
+            --json > checkout.json
+          echo "Checked out commit: $(jq -r '.solver_commit_hash' checkout.json)"
+
       - name: Build CVC5 production binary
         run: |
           ./scripts/cvc5/build.sh --static
-      
+
       - name: Get commit hash
         id: get-commit
         working-directory: cvc5
         run: |
           COMMIT_HASH=$(git rev-parse HEAD)
-          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "CVC5 commit hash: $COMMIT_HASH"
-      
-      - name: Collect production artifacts
+
+      - name: Archive production artifacts from contract
         run: |
-          ./scripts/cvc5/collect_build_artifacts.sh cvc5/build .artifacts-production
-      
-      - name: Compress production artifacts
-        run: |
-          cd .artifacts-production
-          tar -czf ../cvc5/build/artifacts-production.tar.gz .
-          cd ..
-      
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            collect-artifacts \
+            --artifacts-dir .artifacts-production \
+            --artifact-archive cvc5/build/artifacts-production.tar.gz \
+            --json > production-artifacts.json
+
       - name: Install LLVM/Clang 17 for coverage build
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: '17'
-      
+          version: "17"
+
       - name: Add LLVM to PATH
-        run: echo "${{ env.LLVM_PATH }}/bin" >> $GITHUB_PATH
-      
+        run: echo "${{ env.LLVM_PATH }}/bin" >> "$GITHUB_PATH"
+
       - name: Clean build for coverage
         run: |
-          if [ -d "cvc5/build" ]; then
-            rm -rf cvc5/build
-          fi
-      
+          rm -rf cvc5/build
+
       - name: Build CVC5 coverage binary
         run: |
           export CXX="clang++ --gcc-toolchain=/usr"
           export CC="clang --gcc-toolchain=/usr"
           ./scripts/cvc5/build.sh --static --coverage
-      
-      - name: Collect coverage artifacts
+
+      - name: Archive coverage artifacts from contract
         run: |
-          ./scripts/cvc5/collect_build_artifacts.sh cvc5/build .artifacts-coverage
-      
-      - name: Compress coverage artifacts
-        run: |
-          cd .artifacts-coverage
-          tar -czf ../cvc5/build/artifacts-coverage.tar.gz .
-          cd ..
-      
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            collect-artifacts \
+            --artifacts-dir .artifacts-coverage \
+            --artifact-archive cvc5/build/artifacts-coverage.tar.gz \
+            --json > coverage-artifacts.json
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      
+
       - name: Upload production binary to S3
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
           S3_KEY="evaluation/rq2/cvc5/builds/production/${COMMIT_HASH}.tar.gz"
-          
+
           aws s3api put-object \
             --bucket ${{ secrets.AWS_S3_BUCKET }} \
             --key "$S3_KEY" \
             --body cvc5/build/artifacts-production.tar.gz
-          
+
           echo "✅ Uploaded production binary to S3: $S3_KEY"
-      
+
       - name: Upload coverage binary to S3
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
           S3_KEY="evaluation/rq2/cvc5/builds/coverage/${COMMIT_HASH}.tar.gz"
-          
+
           aws s3api put-object \
             --bucket ${{ secrets.AWS_S3_BUCKET }} \
             --key "$S3_KEY" \
             --body cvc5/build/artifacts-coverage.tar.gz
-          
+
           echo "✅ Uploaded coverage binary to S3: $S3_KEY"

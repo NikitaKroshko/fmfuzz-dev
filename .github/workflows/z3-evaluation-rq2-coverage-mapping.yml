@@ -92,10 +92,12 @@ jobs:
           aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY artifacts/artifacts.tar.gz
           echo "✅ Downloaded coverage binary for $COMMIT_HASH"
       
-      - name: Extract coverage binary
+      - name: Extract coverage artifact archive
         run: |
-          mkdir -p z3/build
-          ./scripts/z3/extract_build_artifacts.sh artifacts/artifacts.tar.gz z3/build true
+          mkdir -p z3
+          tar -xzf artifacts/artifacts.tar.gz -C z3
+          test -x z3/build/z3
+          test -f z3/build/compile_commands.json
       
       - name: Clone z3test repository
         run: |

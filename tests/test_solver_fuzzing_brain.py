@@ -387,6 +387,50 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             self.assertTrue((root / "collected" / "shared.txt").exists())
             self.assertEqual(warnings, ["missing artifact path: solver:missing.txt"])
 
+    def test_collect_existing_artifacts_can_archive_without_running_a_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "solver" / "build" / "bin").mkdir(parents=True)
+            (root / "solver" / "build" / "bin" / "demo").write_text("binary\n", encoding="utf-8")
+            (root / "solver" / "build" / "compile_commands.json").write_text("[]\n", encoding="utf-8")
+            contract = self._write_contract(
+                root / "solver.yml",
+                """\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: /bin/true
+                coverage_build_command: /bin/true --instrumentation
+                production_binary_path: build/bin/demo
+                coverage_binary_path: build/bin/demo
+                test_root: .
+                test_discovery_command: null
+                target_commands:
+                  - "{target_binary}"
+                oracle_command: null
+                environment_requirements:
+                  packages: []
+                  env: []
+                artifact_paths:
+                  - build/bin/demo
+                  - build/compile_commands.json
+                artifact_s3_bucket: null
+                artifact_s3_prefix: null
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            result = brain.collect_existing_artifacts(
+                artifacts_dir=root / "collected",
+                artifact_archive=root / "archive.tar.gz",
+            )
+
+            self.assertTrue((root / "collected" / "build" / "bin" / "demo").exists())
+            self.assertTrue((root / "collected" / "build" / "compile_commands.json").exists())
+            self.assertEqual(result.warnings, ())
+            self.assertEqual(result.artifact_archive, (root / "archive.tar.gz").resolve())
+            self.assertTrue(result.artifact_archive.exists())
+
     def test_upload_to_s3_uses_contract_or_override_without_requiring_real_boto3(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

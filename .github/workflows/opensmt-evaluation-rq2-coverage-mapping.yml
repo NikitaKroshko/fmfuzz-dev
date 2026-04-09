@@ -108,10 +108,11 @@ jobs:
           git checkout ${{ matrix.commit }}
           echo "Checked out commit: $(git rev-parse HEAD)"
 
-      - name: Extract coverage binary
+      - name: Extract coverage artifact archive
         run: |
-          mkdir -p opensmt/build
-          bash ./scripts/opensmt/extract_build_artifacts.sh artifacts/artifacts.tar.gz opensmt/build true
+          tar -xzf artifacts/artifacts.tar.gz -C opensmt
+          test -x opensmt/build/bin/opensmt
+          test -f opensmt/build/compile_commands.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
