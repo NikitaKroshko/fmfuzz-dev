@@ -14,6 +14,14 @@ target_commands:
   - "{reference_binary} --check-models --check-proofs --strings-exp"
   - "{target_binary}"
 oracle_command: python3 scripts/oracle.py --cvc5-path {reference_binary} --solver-path {target_binary} {test_file}
+coverage_target_job_count: 4
+coverage_average_test_time_seconds: 12.0
+coverage_mapper_command: python3 scripts/opensmt/coverage/coverage_mapper.py --build-dir {build_dir} --opensmt-dir {solver_workspace}
+commit_prepare_command: python3 scripts/opensmt/commit_fuzzer/prepare_commit_fuzzer.py --opensmt-dir {solver_workspace}
+regression_kind: per-test
+regression_command: {target_binary} {test_path}
+regression_working_directory: build
+regression_timeout_seconds: 120
 environment_requirements:
   packages:
     - build-essential

@@ -15,6 +15,7 @@ class ContractError(ValueError):
 
 
 _INTEGER_RE = re.compile(r"^-?\d+$")
+_FLOAT_RE = re.compile(r"^-?(?:\d+\.\d*|\d*\.\d+)$")
 _GITHUB_REPOSITORY_RE = re.compile(
     r"^(?:https://github\.com/|git@github\.com:)(?P<slug>[^/]+/[^/.]+)(?:\.git)?/?$"
 )
@@ -53,6 +54,15 @@ class SolverContract:
     artifact_paths: Tuple[str, ...]
     artifact_s3_bucket: Optional[str]
     artifact_s3_prefix: Optional[str]
+    coverage_target_job_count: Optional[int]
+    coverage_average_test_time_seconds: Optional[float]
+    coverage_mapper_command: Optional[str]
+    commit_prepare_command: Optional[str]
+    regression_kind: Optional[str]
+    regression_command: Optional[str]
+    regression_working_directory: Optional[str]
+    regression_environment: Tuple[str, ...]
+    regression_timeout_seconds: Optional[int]
     environment_requirements: EnvironmentRequirements
 
     @property
@@ -163,6 +173,36 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
     artifact_s3_bucket = _optional_string(data.get("artifact_s3_bucket"))
     artifact_s3_prefix = _optional_string(data.get("artifact_s3_prefix"))
     oracle_command = _optional_string(data.get("oracle_command"))
+    coverage_target_job_count = _optional_int(data.get("coverage_target_job_count"))
+    coverage_average_test_time_seconds = _optional_float(
+        data.get("coverage_average_test_time_seconds")
+    )
+    coverage_mapper_command = _optional_string(data.get("coverage_mapper_command"))
+    commit_prepare_command = _optional_string(data.get("commit_prepare_command"))
+    regression_kind = _optional_string(data.get("regression_kind"))
+    regression_command = _optional_string(data.get("regression_command"))
+    regression_working_directory = _optional_string(data.get("regression_working_directory"))
+    regression_timeout_seconds = _optional_int(data.get("regression_timeout_seconds"))
+
+    if regression_kind and regression_kind not in {"command", "per-test"}:
+        raise ContractError(
+            f"`regression_kind` for solver `{solver_name}` in `{contract_path.name}` "
+            "must be `command` or `per-test`"
+        )
+    if regression_kind and not regression_command:
+        raise ContractError(
+            f"`regression_command` is required when `regression_kind` is set for solver "
+            f"`{solver_name}` in `{contract_path.name}`"
+        )
+    regression_environment = tuple(
+        _string_list(
+            data.get("regression_environment", []),
+            "regression_environment",
+            contract_path,
+            solver_name,
+            allow_empty=True,
+        )
+    )
 
     environment_raw = data.get("environment_requirements", {})
     if environment_raw is None:
@@ -212,6 +252,15 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
         artifact_paths=artifact_paths,
         artifact_s3_bucket=artifact_s3_bucket,
         artifact_s3_prefix=artifact_s3_prefix,
+        coverage_target_job_count=coverage_target_job_count,
+        coverage_average_test_time_seconds=coverage_average_test_time_seconds,
+        coverage_mapper_command=coverage_mapper_command,
+        commit_prepare_command=commit_prepare_command,
+        regression_kind=regression_kind,
+        regression_command=regression_command,
+        regression_working_directory=regression_working_directory,
+        regression_environment=regression_environment,
+        regression_timeout_seconds=regression_timeout_seconds,
         environment_requirements=environment_requirements,
     )
 
@@ -238,6 +287,38 @@ def _optional_string(value: Any) -> Optional[str]:
         normalized = value.strip()
         return normalized if normalized else None
     return str(value).strip() or None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if _INTEGER_RE.match(normalized):
+            return int(normalized)
+    raise ContractError(f"expected integer-compatible value, got {value!r}")
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if _INTEGER_RE.match(normalized) or _FLOAT_RE.match(normalized):
+            return float(normalized)
+    raise ContractError(f"expected float-compatible value, got {value!r}")
 
 
 def _string_list(
@@ -404,6 +485,8 @@ def _parse_scalar(value: str) -> Any:
         return False
     if _INTEGER_RE.match(normalized):
         return int(normalized)
+    if _FLOAT_RE.match(normalized):
+        return float(normalized)
     if normalized in {"[]", "{}"}:
         return ast.literal_eval(normalized)
     if (normalized.startswith('"') and normalized.endswith('"')) or (

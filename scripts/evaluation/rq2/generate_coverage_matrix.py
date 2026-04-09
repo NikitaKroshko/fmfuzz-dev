@@ -1,165 +1,113 @@
 #!/usr/bin/env python3
-"""Generate combined matrix of (commit, chunk) for coverage mapping"""
+"""Generate an RQ2 coverage matrix through the shared contract-driven brain."""
 
+from __future__ import annotations
+
+import json
 import os
 import sys
-import json
-import boto3
-import subprocess
-import shutil
 import tarfile
+from pathlib import Path
+
+import boto3
 from botocore.exceptions import ClientError
 
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def _archive_contains_prefix(artifact_path: str, prefix: str) -> bool:
-    with tarfile.open(artifact_path, "r:gz") as archive:
-        normalized = prefix.rstrip("/") + "/"
-        for member in archive.getnames():
-            if member == prefix.rstrip("/") or member.startswith(normalized):
-                return True
-    return False
+from scripts.solver_contract import load_solver_contract
+from scripts.solver_fuzzing_brain import SolverFuzzingBrain
 
 
-def _extract_generic_archive(artifact_path: str, destination_root: str) -> None:
-    os.makedirs(destination_root, exist_ok=True)
-    with tarfile.open(artifact_path, "r:gz") as archive:
-        archive.extractall(destination_root)
+CONTRACTS = {
+    "cvc5": ROOT / "contracts" / "solvers" / "cvc5.yml",
+    "z3": ROOT / "contracts" / "solvers" / "z3.yml",
+    "opensmt": ROOT / "contracts" / "solvers" / "opensmt.yml",
+}
 
-def main():
-    solver = sys.argv[1]
-    max_commits = None
-    if len(sys.argv) > 2:
-        try:
-            max_commits = int(sys.argv[2])
-        except ValueError:
-            pass
-    
-    bucket = os.getenv('AWS_S3_BUCKET')
+
+def _download_selected_commits(solver: str) -> list[str]:
+    bucket = os.getenv("AWS_S3_BUCKET")
     if not bucket:
         raise RuntimeError("AWS_S3_BUCKET environment variable not set")
-    
-    s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'eu-north-1'))
+
+    client = boto3.client("s3", region_name=os.getenv("AWS_REGION", "eu-north-1"))
     s3_key = f"evaluation/rq2/{solver}/selected-commits.json"
-    
-    # Read selected commits
     try:
-        response = s3_client.get_object(Bucket=bucket, Key=s3_key)
-        selected_commits = json.loads(response['Body'].read().decode('utf-8'))
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'NoSuchKey':
-            raise RuntimeError(f"Selected commits not found at {s3_key}. Run commit selection first.")
+        response = client.get_object(Bucket=bucket, Key=s3_key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "NoSuchKey":
+            raise RuntimeError(f"Selected commits not found at {s3_key}. Run commit selection first.") from exc
         raise
-    
+    return json.loads(response["Body"].read().decode("utf-8"))
+
+
+def _extract_artifact_archive(archive_path: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(destination)
+
+
+def main() -> None:
+    solver = sys.argv[1]
+    if solver not in CONTRACTS:
+        raise RuntimeError(f"Unsupported solver: {solver}")
+
+    max_commits = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    selected_commits = _download_selected_commits(solver)
     if not selected_commits:
         raise RuntimeError("No commits selected")
-    
-    # Limit commits if specified
     if max_commits and max_commits > 0:
         selected_commits = selected_commits[:max_commits]
-        print(f"📝 Limited to {len(selected_commits)} commits (max_commits={max_commits})", file=sys.stderr)
-    
-    # Download coverage binary for first commit to discover tests
-    # (We assume all commits have similar test counts)
+        print(f"📝 Limited to {len(selected_commits)} commits", file=sys.stderr)
+
+    contract = load_solver_contract(CONTRACTS[solver])
+    brain = SolverFuzzingBrain(CONTRACTS[solver], workspace_root=ROOT)
+
     first_commit = selected_commits[0]
+    print(f"📥 Preparing coverage matrix from {solver} commit {first_commit}", file=sys.stderr)
+    brain.checkout_repositories(commit_hash=first_commit)
+
+    bucket = os.getenv("AWS_S3_BUCKET")
+    if not bucket:
+        raise RuntimeError("AWS_S3_BUCKET environment variable not set")
+    client = boto3.client("s3", region_name=os.getenv("AWS_REGION", "eu-north-1"))
     coverage_key = f"evaluation/rq2/{solver}/builds/coverage/{first_commit}.tar.gz"
-    
-    print(f"📥 Downloading coverage binary for test discovery...", file=sys.stderr)
-    os.makedirs('artifacts', exist_ok=True)
-    s3_client.download_file(bucket, coverage_key, 'artifacts/artifacts.tar.gz')
 
-    solver_dir = solver
-    build_dir = f"{solver_dir}/build"
+    artifacts_dir = ROOT / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifacts_dir / "artifacts.tar.gz"
+    client.download_file(bucket, coverage_key, str(artifact_path))
+    _extract_artifact_archive(artifact_path, brain.layout.solver_workspace)
+    print(f"📦 Extracted coverage artifact into {brain.layout.solver_workspace}", file=sys.stderr)
 
-    # Discover tests and generate chunks
-    if solver == 'z3':
-        # Clone z3test if needed
-        if not os.path.exists('z3test'):
-            subprocess.run(['git', 'clone', 'https://github.com/z3prover/z3test.git', 'z3test'], check=True)
-        
-        # Generate matrix
-        result = subprocess.run(
-            ['python3', 'scripts/z3/coverage/generate_matrix.py',
-             '--z3test-dir', 'z3test',
-             '--max-job-time', '60',
-             '--buffer', '10',
-             '--output', 'matrix.json'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    elif solver == 'cvc5':
-        result = subprocess.run(
-            ['python3', 'scripts/cvc5/coverage/generate_matrix.py',
-             '--build-dir', build_dir,
-             '--max-job-time', '60',
-             '--buffer', '10',
-             '--output', 'matrix.json'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    else:  # opensmt
-        if not os.path.exists('opensmt') or not os.path.isdir('opensmt') or not os.path.exists('opensmt/.git'):
-            if os.path.exists('opensmt') and not os.path.exists('opensmt/.git'):
-                shutil.rmtree('opensmt')
-            subprocess.run(['git', 'clone', 'https://github.com/usi-verification-and-security/OpenSMT.git', 'opensmt'], check=True)
-        else:
-            subprocess.run(['git', '-C', 'opensmt', 'fetch', '--all', '--tags'], check=True)
+    chunk_matrix = brain.build_coverage_matrix()
+    chunks = chunk_matrix["matrix"]["include"]
+    print(
+        f"📊 Discovered {chunk_matrix['total_tests']} tests, {len(chunks)} chunks",
+        file=sys.stderr,
+    )
 
-        subprocess.run(['git', '-C', 'opensmt', 'checkout', first_commit], check=True)
-
-    artifact_path = 'artifacts/artifacts.tar.gz'
-    if _archive_contains_prefix(artifact_path, 'build'):
-        _extract_generic_archive(artifact_path, solver_dir)
-        print(f"📦 Extracted contract archive into {solver_dir}", file=sys.stderr)
-    else:
-        os.makedirs(build_dir, exist_ok=True)
-        extract_script = f"scripts/{solver}/extract_build_artifacts.sh"
-        result = subprocess.run(
-            ['bash', extract_script, artifact_path, build_dir, 'true'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print(result.stdout, file=sys.stderr)
-
-    if solver == 'opensmt':
-        # The repo checkout above is used for discovering the corpus ordering.
-        result = subprocess.run(
-            ['python3', 'scripts/opensmt/coverage/generate_matrix.py',
-             '--opensmt-dir', 'opensmt',
-             '--max-job-time', '60',
-             '--buffer', '10',
-             '--output', 'matrix.json'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    
-    with open('matrix.json', 'r') as f:
-        chunk_matrix = json.load(f)
-    
-    chunks = chunk_matrix['matrix']['include']
-    print(f"📊 Discovered {chunk_matrix['total_tests']} tests, {len(chunks)} chunks", file=sys.stderr)
-    
-    # Generate combined matrix: (commit, chunk)
     combined_matrix = []
     for commit in selected_commits:
         for chunk in chunks:
-            combined_matrix.append({
-                'commit': commit,
-                'chunk': chunk
-            })
-    
-    output = {
-        'include': combined_matrix,
-        'total_commits': len(selected_commits),
-        'total_chunks': len(chunks),
-        'chunks_per_commit': len(chunks)
-    }
-    
-    print(json.dumps(output, separators=(',', ':')))
-    print(f"Generated combined matrix: {len(combined_matrix)} jobs ({len(selected_commits)} commits × {len(chunks)} chunks)", file=sys.stderr)
+            combined_matrix.append({"commit": commit, "chunk": chunk})
 
-if __name__ == '__main__':
+    output = {
+        "include": combined_matrix,
+        "total_commits": len(selected_commits),
+        "total_chunks": len(chunks),
+        "chunks_per_commit": len(chunks),
+        "repository_path": contract.repository_path,
+    }
+    print(json.dumps(output, separators=(",", ":")))
+    print(
+        f"Generated combined matrix: {len(combined_matrix)} jobs "
+        f"({len(selected_commits)} commits × {len(chunks)} chunks)",
+        file=sys.stderr,
+    )
+
+
+if __name__ == "__main__":
     main()

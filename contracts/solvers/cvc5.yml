@@ -14,6 +14,15 @@ target_commands:
   - "{reference_binary}"
   - "{target_binary} --check-models --check-proofs --strings-exp"
 oracle_command: null
+coverage_target_job_count: 6
+coverage_average_test_time_seconds: 18.6
+coverage_mapper_command: python3 scripts/cvc5/coverage/coverage_mapper.py --build-dir {build_dir}
+commit_prepare_command: python3 scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py
+regression_kind: command
+regression_command: ctest -L {suite} -j{workers} --output-on-failure
+regression_working_directory: build
+regression_environment:
+  - TEST_TIMEOUT=120
 environment_requirements:
   packages:
     - build-essential

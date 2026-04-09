@@ -6,8 +6,9 @@
 - Solver repositories provide thin entrypoints:
   - `build.sh`
   - `test.sh`
-  - a thin workflow wrapper
-- Solver-specific Python routes should not be added to the shared brain.
+  - a thin workflow wrapper only when the shared brain needs a contract handle
+- Coverage sharding, coverage joining, commit-history preparation, regression execution, and harness orchestration all run through shared brain subcommands.
+- Solver-specific Python routes are only justified when they provide parser or solver-native adapter logic that the contract delegates to explicitly.
 
 ### Contract
 - Source of truth: `contracts/solvers/<solver>.yml`
@@ -26,6 +27,15 @@
   - `tests_repository_url`
   - `tests_repository_path`
   - `oracle_command`
+  - `coverage_target_job_count`
+  - `coverage_average_test_time_seconds`
+  - `coverage_mapper_command`
+  - `commit_prepare_command`
+  - `regression_kind`
+  - `regression_command`
+  - `regression_working_directory`
+  - `regression_environment`
+  - `regression_timeout_seconds`
   - `environment_requirements`
   - `artifact_paths`
   - `artifact_s3_bucket`
@@ -51,14 +61,17 @@
 6. Discover tests through `test_discovery_command` or `test_root`.
 7. Run the shared commit harness with contract-provided target commands.
 8. Run the oracle if the contract defines one.
-9. Collect local artifacts and optionally upload them to S3.
+9. Build coverage shard matrices, run contract-declared coverage shard commands, and join shard artifacts.
+10. Run contract-declared commit preparation for one commit or a commit history window.
+11. Run contract-driven regression execution.
+12. Collect local artifacts and optionally upload them to S3.
 
 ### Onboarding A New Solver
 1. Add `contracts/solvers/<solver>.yml`.
 2. Add or adapt `scripts/<solver>/build.sh`.
 3. Add or adapt `scripts/<solver>/test.sh`.
 4. Add a thin workflow wrapper that points to the contract.
-5. If the solver needs commit-selection or coverage-specific helpers, keep them outside the shared brain.
+5. Only add solver-specific Python helpers when they expose parser or solver-native behavior the shared brain cannot own directly.
 
 ### Errors
 - Contract failures are explicit and fail fast.

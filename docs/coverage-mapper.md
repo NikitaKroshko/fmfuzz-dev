@@ -12,7 +12,10 @@
   - the coverage build command
   - the coverage binary path
   - test discovery information
-- Coverage-specific analysis scripts remain separate from the shared fuzzing brain, but they should consume the workspace and binaries prepared through the contract-driven path.
+  - coverage matrix sizing metadata
+  - the contract-declared coverage mapper command for the solver-local parser/runner
+- The shared brain owns coverage matrix generation, shard execution, and shard joining.
+- Solver-specific coverage code is limited to the mapper/parser that knows how to execute one test slice and interpret solver-local coverage output.
 
 ### Inputs
 - Instrumented solver build from `build.sh --instrumentation`
@@ -35,5 +38,5 @@
 - Build logs and coverage byproducts from contract-declared artifact paths
 
 ### Guidance
-- Keep solver-specific parsing or report-merging logic outside the shared brain.
-- Do not hardcode checkout URLs or build commands in workflows when the contract already defines them.
+- Keep only parsing or solver-native test execution differences outside the shared brain.
+- Do not hardcode checkout URLs, build commands, shard scripts, or join scripts in workflows when the contract already defines the route.

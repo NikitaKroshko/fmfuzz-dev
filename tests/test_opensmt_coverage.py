@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 from scripts.local_commit_fuzzer_matrix import discover_opensmt_tests
 from scripts.coverage.count_tests import count_opensmt_tests
-from scripts.opensmt.coverage.generate_matrix import generate_matrix
 from scripts.solver_fuzzing_brain import SolverFuzzingBrain
 
 
@@ -78,16 +77,20 @@ class OpenSMTCoverageTests(unittest.TestCase):
                 ],
             )
 
-            matrix = generate_matrix(opensmt_dir=str(repo_root))
+            brain = SolverFuzzingBrain(
+                Path(__file__).resolve().parents[1] / "contracts" / "solvers" / "opensmt.yml",
+                workspace_root=Path(tmp),
+            )
+            matrix = brain.build_coverage_matrix()
             self.assertEqual(matrix["total_tests"], 4)
             self.assertEqual(matrix["total_jobs"], 4)
             self.assertEqual(
                 matrix["matrix"]["include"],
                 [
-                    {"job_name": "opensmt-part1", "start_index": 1, "end_index": 1},
-                    {"job_name": "opensmt-part2", "start_index": 2, "end_index": 2},
-                    {"job_name": "opensmt-part3", "start_index": 3, "end_index": 3},
-                    {"job_name": "opensmt-part4", "start_index": 4, "end_index": 4},
+                    {"job_name": "opensmt-coverage-1", "start_index": 1, "end_index": 1},
+                    {"job_name": "opensmt-coverage-2", "start_index": 2, "end_index": 2},
+                    {"job_name": "opensmt-coverage-3", "start_index": 3, "end_index": 3},
+                    {"job_name": "opensmt-coverage-4", "start_index": 4, "end_index": 4},
                 ],
             )
 
@@ -96,7 +99,11 @@ class OpenSMTCoverageTests(unittest.TestCase):
             repo_root = Path(tmp) / "opensmt"
             (repo_root / "test" / "regression").mkdir(parents=True)
 
-            matrix = generate_matrix(opensmt_dir=str(repo_root))
+            brain = SolverFuzzingBrain(
+                Path(__file__).resolve().parents[1] / "contracts" / "solvers" / "opensmt.yml",
+                workspace_root=Path(tmp),
+            )
+            matrix = brain.build_coverage_matrix()
             self.assertEqual(matrix, {"matrix": {"include": []}, "total_tests": 0, "total_jobs": 0})
 
     def test_generate_matrix_reports_actual_job_count_for_non_even_corpora(self) -> None:
@@ -113,7 +120,11 @@ class OpenSMTCoverageTests(unittest.TestCase):
                 target_dir.mkdir(parents=True, exist_ok=True)
                 (target_dir / name).write_text("(check-sat)\n", encoding="utf-8")
 
-            matrix = generate_matrix(opensmt_dir=str(repo_root))
+            brain = SolverFuzzingBrain(
+                Path(__file__).resolve().parents[1] / "contracts" / "solvers" / "opensmt.yml",
+                workspace_root=Path(tmp),
+            )
+            matrix = brain.build_coverage_matrix()
 
             self.assertEqual(matrix["total_tests"], 5)
             self.assertEqual(matrix["total_jobs"], len(matrix["matrix"]["include"]))
@@ -260,8 +271,6 @@ class OpenSMTCoverageTests(unittest.TestCase):
             )
 
     def test_opensmt_regression_runner_executes_tests_in_discovery_order(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             opensmt_root = tmp_path / "opensmt"
@@ -295,17 +304,11 @@ class OpenSMTCoverageTests(unittest.TestCase):
             )
             opensmt_binary.chmod(0o755)
 
-            module = self._load_module(
-                "test_opensmt_regression_runner",
-                repo_root / "scripts" / "opensmt" / "run_regression_tests.py",
+            brain = SolverFuzzingBrain(
+                Path(__file__).resolve().parents[1] / "contracts" / "solvers" / "opensmt.yml",
+                workspace_root=tmp_path,
             )
-            runner = module.OpenSMTRegressionRunner(
-                build_dir=str(build_dir),
-                opensmt_dir=str(opensmt_root),
-                opensmt_path=str(opensmt_binary),
-            )
-
-            exit_code = runner.run()
+            exit_code = brain.run_regression(mode="instrumentation")
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(
@@ -317,43 +320,36 @@ class OpenSMTCoverageTests(unittest.TestCase):
             )
 
     def test_z3_generate_matrix_caps_job_count_and_avoids_empty_shards(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        module = self._load_module(
-            "test_z3_generate_matrix",
-            repo_root / "scripts" / "z3" / "coverage" / "generate_matrix.py",
+        brain = SolverFuzzingBrain(
+            Path(__file__).resolve().parents[1] / "contracts" / "solvers" / "z3.yml",
+            workspace_root=Path(__file__).resolve().parents[1],
         )
-
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.object(module, "CoverageMapper") as mapper_cls,
-            patch.object(module, "filter_tests", side_effect=lambda tests, _z3dir: tests),
+        with patch.object(
+            brain,
+            "discover_tests",
+            return_value=[
+                "regressions/smt2/a.smt2",
+                "regressions/smt2/b.smt2",
+                "regressions/smt2/c.smt2",
+            ],
         ):
-            mapper_cls.return_value.get_smt2_tests.return_value = [
-                (1, "regressions/smt2/a.smt2"),
-                (2, "regressions/smt2/b.smt2"),
-                (3, "regressions/smt2/c.smt2"),
-            ]
-            matrix = module.generate_matrix(z3test_dir=tmp)
+            matrix = brain.build_coverage_matrix()
 
         self.assertEqual(matrix["total_tests"], 3)
         self.assertEqual(matrix["total_jobs"], 3)
         self.assertEqual(
             matrix["matrix"]["include"],
             [
-                {"job_name": "z3-part1", "start_index": 1, "end_index": 1},
-                {"job_name": "z3-part2", "start_index": 2, "end_index": 2},
-                {"job_name": "z3-part3", "start_index": 3, "end_index": 3},
+                {"job_name": "z3-coverage-1", "start_index": 1, "end_index": 1},
+                {"job_name": "z3-coverage-2", "start_index": 2, "end_index": 2},
+                {"job_name": "z3-coverage-3", "start_index": 3, "end_index": 3},
             ],
         )
 
     def test_cvc5_generate_matrix_caps_job_count_and_handles_tiny_time_budget(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        module = self._load_module(
-            "test_cvc5_generate_matrix",
-            repo_root / "scripts" / "cvc5" / "coverage" / "generate_matrix.py",
-        )
+        from scripts.solver_fuzzing_brain import calculate_job_chunks
 
-        total_jobs, tests_per_job = module.calculate_jobs(
+        total_jobs, tests_per_job = calculate_job_chunks(
             total_tests=2,
             target_jobs=6,
             max_job_time_minutes=11,
@@ -362,22 +358,21 @@ class OpenSMTCoverageTests(unittest.TestCase):
         )
         self.assertEqual((total_jobs, tests_per_job), (2, 1))
 
-        with patch.object(module, "CoverageMapper") as mapper_cls:
-            mapper_cls.return_value.get_ctest_tests.return_value = [
-                (1, "suite/a"),
-                (2, "suite/b"),
-                (3, "suite/c"),
-            ]
-            matrix = module.generate_matrix(build_dir="ignored")
+        brain = SolverFuzzingBrain(
+            Path(__file__).resolve().parents[1] / "contracts" / "solvers" / "cvc5.yml",
+            workspace_root=Path(__file__).resolve().parents[1],
+        )
+        with patch.object(brain, "discover_tests", return_value=["suite/a", "suite/b", "suite/c"]):
+            matrix = brain.build_coverage_matrix()
 
         self.assertEqual(matrix["total_tests"], 3)
         self.assertEqual(matrix["total_jobs"], 3)
         self.assertEqual(
             matrix["matrix"]["include"],
             [
-                {"job_name": "regress0a", "start_index": 1, "end_index": 1},
-                {"job_name": "regress0b", "start_index": 2, "end_index": 2},
-                {"job_name": "regress0c", "start_index": 3, "end_index": 3},
+                {"job_name": "cvc5-coverage-1", "start_index": 1, "end_index": 1},
+                {"job_name": "cvc5-coverage-2", "start_index": 2, "end_index": 2},
+                {"job_name": "cvc5-coverage-3", "start_index": 3, "end_index": 3},
             ],
         )
 

@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import math
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -14,7 +17,7 @@ import sys
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -131,6 +134,10 @@ TYPEFUZZ_HARNESS_TEMPLATE = [
     "{test_path}",
 ]
 
+_SUMMARY_RE = re.compile(
+    r"Changed functions: (?P<total>\d+); with coverage: (?P<with>\d+); without: (?P<without>\d+);"
+)
+
 
 def ensure_command_available(command: str, label: str) -> None:
     """Fail fast if a required command cannot be resolved."""
@@ -141,6 +148,42 @@ def ensure_command_available(command: str, label: str) -> None:
         return
     if shutil.which(executable) is None:
         raise ValueError(f"{label} not found in PATH: {executable}")
+
+
+def calculate_job_chunks(
+    *,
+    total_tests: int,
+    target_jobs: int,
+    max_job_time_minutes: int,
+    buffer_minutes: int,
+    avg_test_time_seconds: float,
+) -> tuple[int, int]:
+    if total_tests <= 0:
+        return 0, 0
+    if target_jobs < 1:
+        raise ValueError("target_jobs must be a positive integer")
+    if max_job_time_minutes <= buffer_minutes:
+        raise ValueError("max_job_time_minutes must be greater than buffer_minutes")
+    if avg_test_time_seconds <= 0:
+        raise ValueError("avg_test_time_seconds must be positive")
+
+    available_time_seconds = (max_job_time_minutes - buffer_minutes) * 60
+    max_tests_per_job = max(1, int(available_time_seconds / avg_test_time_seconds))
+    min_jobs = max(1, math.ceil(total_tests / max_tests_per_job))
+
+    total_jobs = min(max(1, target_jobs), total_tests)
+    while True:
+        tests_per_job = max(1, math.ceil(total_tests / total_jobs))
+        estimated_minutes = (tests_per_job * avg_test_time_seconds + buffer_minutes * 60) / 60.0
+        if estimated_minutes <= max_job_time_minutes:
+            break
+        if total_jobs >= min_jobs or total_jobs >= total_tests:
+            total_jobs = min(total_tests, min_jobs)
+            tests_per_job = max(1, math.ceil(total_tests / total_jobs))
+            break
+        total_jobs = min(total_tests, total_jobs + 1)
+
+    return total_jobs, tests_per_job
 
 
 def run_contract_harness(
@@ -230,6 +273,7 @@ class SolverFuzzingBrain:
         self,
         *,
         mode: str,
+        extra_args: Optional[Sequence[str]] = None,
         artifacts_dir: Optional[str | Path] = None,
         artifact_archive: Optional[str | Path] = None,
         upload_s3: bool = False,
@@ -255,18 +299,38 @@ class SolverFuzzingBrain:
 
         warnings: List[str] = []
         try:
-            result = self._run_command(
+            argv = self._parse_command_template(
+                command_template,
+                self._command_context(mode=normalized_mode),
                 step=f"{normalized_mode} build",
-                command_template=command_template,
-                context=self._command_context(mode=normalized_mode),
-                log_path=log_path,
-                category="build problem",
-                hint=(
-                    f"{normalized_mode}_binary_path did not resolve to an executable"
-                    if normalized_mode == "instrumentation"
-                    else "production_binary_path did not resolve to an executable"
-                ),
+                hint=f"fix `{normalized_mode} build` command in `{self.contract.contract_path.name}`",
             )
+            if extra_args:
+                argv.extend(list(extra_args))
+            result = self._execute_argv(
+                argv=argv,
+                log_path=log_path,
+                cwd=self.brain_root,
+                extra_env={},
+                timeout_seconds=None,
+            )
+            if result.returncode != 0:
+                raise BrainError(
+                    solver_name=self.contract.solver_name,
+                    repository_url=self.contract.repository_url,
+                    step=f"{normalized_mode} build",
+                    message="command failed",
+                    command=result.command_string,
+                    exit_code=result.returncode,
+                    log_path=result.log_path,
+                    issues_url=self.contract.resolved_issues_url,
+                    hint=(
+                        f"{normalized_mode}_binary_path did not resolve to an executable"
+                        if normalized_mode == "instrumentation"
+                        else "production_binary_path did not resolve to an executable"
+                    ),
+                    category="build problem",
+                )
             binary_path = self._extract_binary_path(
                 result.stdout,
                 self.contract.production_binary_path
@@ -389,6 +453,452 @@ class SolverFuzzingBrain:
             "solver": self.contract.solver_name,
         }
 
+    def build_coverage_matrix(
+        self,
+        *,
+        max_job_time_minutes: int = 60,
+        buffer_minutes: int = 10,
+        avg_test_time_seconds: Optional[float] = None,
+        target_jobs: Optional[int] = None,
+    ) -> Dict[str, object]:
+        try:
+            tests = self.discover_tests()
+        except BrainError as exc:
+            if exc.step == "test discovery" and "zero tests" in exc.message:
+                return {"matrix": {"include": []}, "total_tests": 0, "total_jobs": 0}
+            raise
+        total_tests = len(tests)
+        if total_tests == 0:
+            return {"matrix": {"include": []}, "total_tests": 0, "total_jobs": 0}
+
+        resolved_target_jobs = target_jobs or self.contract.coverage_target_job_count or 4
+        resolved_avg_test_time = (
+            avg_test_time_seconds
+            if avg_test_time_seconds is not None
+            else self.contract.coverage_average_test_time_seconds or 10.0
+        )
+        total_jobs, tests_per_job = calculate_job_chunks(
+            total_tests=total_tests,
+            target_jobs=resolved_target_jobs,
+            max_job_time_minutes=max_job_time_minutes,
+            buffer_minutes=buffer_minutes,
+            avg_test_time_seconds=resolved_avg_test_time,
+        )
+
+        matrix_entries: List[Dict[str, object]] = []
+        for job_id in range(1, total_jobs + 1):
+            start_index = (job_id - 1) * tests_per_job + 1
+            if start_index > total_tests:
+                break
+            end_index = min(job_id * tests_per_job, total_tests)
+            matrix_entries.append(
+                {
+                    "job_name": f"{self.contract.solver_name}-coverage-{job_id}",
+                    "start_index": start_index,
+                    "end_index": end_index,
+                }
+            )
+
+        return {
+            "matrix": {"include": matrix_entries},
+            "total_tests": total_tests,
+            "total_jobs": len(matrix_entries),
+            "tests_per_job": tests_per_job,
+            "solver": self.contract.solver_name,
+        }
+
+    def run_coverage_shard(
+        self,
+        *,
+        start_index: int,
+        end_index: int,
+        output_path: Optional[str | Path] = None,
+        reference_binary: Optional[str] = None,
+        log_path: Optional[str | Path] = None,
+    ) -> Path:
+        if not self.contract.coverage_mapper_command:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="coverage shard",
+                message="contract does not declare a coverage mapper command",
+                issues_url=self.contract.resolved_issues_url,
+                hint=f"add `coverage_mapper_command` to `{self.contract.contract_path.name}`",
+                category="bad contract problem",
+            )
+        if start_index < 1 or end_index < start_index:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="coverage shard",
+                message=f"invalid shard range: {start_index}-{end_index}",
+                issues_url=self.contract.resolved_issues_url,
+                hint="use one-based indices and ensure end_index >= start_index",
+                category="bad contract problem",
+            )
+
+        self._ensure_workspace_exists()
+        build_dir = self.resolve_build_directory(mode="instrumentation")
+        resolved_output = (
+            Path(output_path).resolve()
+            if output_path
+            else (build_dir / f"coverage_mapping_{start_index}_{end_index}.json").resolve()
+        )
+        resolved_output.parent.mkdir(parents=True, exist_ok=True)
+        optional_log = Path(log_path).resolve() if log_path else None
+
+        context = self._command_context(
+            mode="instrumentation",
+            target_binary=str(self.resolve_binary(mode="instrumentation")),
+            reference_binary=(
+                self._normalize_external_command(reference_binary, Path.cwd())
+                if reference_binary
+                else "cvc5"
+            ),
+        )
+        context.update(
+            {
+                "build_dir": str(build_dir),
+                "output_path": str(resolved_output),
+            }
+        )
+        argv = self._parse_command_template(
+            self.contract.coverage_mapper_command,
+            context,
+            step="coverage shard",
+            hint=f"fix `coverage_mapper_command` in `{self.contract.contract_path.name}`",
+        )
+        argv.extend(
+            [
+                "--start-index",
+                str(start_index),
+                "--end-index",
+                str(end_index),
+                "--output",
+                str(resolved_output),
+            ]
+        )
+        result = self._execute_argv(
+            argv=argv,
+            log_path=optional_log,
+            cwd=self.brain_root,
+            extra_env={},
+            timeout_seconds=None,
+        )
+        if result.returncode != 0:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="coverage shard",
+                message="coverage mapper command failed",
+                command=result.command_string,
+                exit_code=result.returncode,
+                log_path=result.log_path,
+                issues_url=self.contract.resolved_issues_url,
+                hint="check mapper stderr and the declared coverage mapper command",
+                category="coverage problem",
+            )
+        if not resolved_output.exists():
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="coverage shard",
+                message=f"coverage mapper did not produce the expected output: {resolved_output}",
+                command=result.command_string,
+                log_path=result.log_path,
+                issues_url=self.contract.resolved_issues_url,
+                hint="ensure the coverage mapper honors `--output`",
+                category="coverage problem",
+            )
+        return resolved_output
+
+    def join_coverage_mappings(
+        self,
+        *,
+        mappings_dir: str | Path,
+        output_path: str | Path = "coverage_mapping.json",
+        gzip_output: bool = True,
+    ) -> tuple[Path, Optional[Path]]:
+        input_root = Path(mappings_dir).resolve()
+        if not input_root.exists():
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="coverage join",
+                message=f"coverage mappings directory not found: {input_root}",
+                issues_url=self.contract.resolved_issues_url,
+                hint="download or generate coverage shard artifacts first",
+                category="coverage problem",
+            )
+
+        mapping_files = sorted(input_root.rglob("coverage_mapping_*.json"))
+        if not mapping_files:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="coverage join",
+                message=f"no coverage shard mappings found under {input_root}",
+                issues_url=self.contract.resolved_issues_url,
+                hint="ensure shard artifacts contain coverage_mapping_*.json files",
+                category="coverage problem",
+            )
+
+        merged: Dict[str, set[str]] = {}
+        for path in mapping_files:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for function_key, tests in data.items():
+                merged.setdefault(function_key, set()).update(str(test) for test in tests)
+
+        resolved_output = Path(output_path).resolve()
+        resolved_output.parent.mkdir(parents=True, exist_ok=True)
+        payload = {key: sorted(values) for key, values in sorted(merged.items())}
+        resolved_output.write_text(
+            json.dumps(payload, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        gzip_path: Optional[Path] = None
+        if gzip_output:
+            gzip_path = resolved_output.with_suffix(resolved_output.suffix + ".gz")
+            with resolved_output.open("rb") as source, gzip.open(gzip_path, "wb") as destination:
+                shutil.copyfileobj(source, destination)
+
+        return resolved_output, gzip_path
+
+    def count_tests(self) -> Dict[str, object]:
+        tests = self.discover_tests()
+        return {
+            "test_count": len(tests),
+            "commit_hash": self.resolve_commit_hash(self.layout.solver_workspace) or "unknown",
+            "solver_version": "main",
+        }
+
+    def run_regression(
+        self,
+        *,
+        suite: Optional[str] = None,
+        mode: str = "production",
+        target_binary: Optional[str] = None,
+        workers: Optional[int] = None,
+    ) -> int:
+        if not self.contract.regression_kind or not self.contract.regression_command:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="regression",
+                message="contract does not declare regression execution",
+                issues_url=self.contract.resolved_issues_url,
+                hint=f"add `regression_kind` and `regression_command` to `{self.contract.contract_path.name}`",
+                category="bad contract problem",
+            )
+
+        self._ensure_workspace_exists()
+        resolved_target_binary = self.resolve_binary(mode=mode, override=target_binary)
+        workdir = self.resolve_regression_working_directory()
+        extra_env = self._environment_assignments(self.contract.regression_environment)
+        worker_count = workers or max(1, os.cpu_count() or 1)
+
+        if self.contract.regression_kind == "command":
+            context = self._command_context(mode=mode, target_binary=str(resolved_target_binary))
+            context.update({"suite": suite or "", "workers": str(worker_count)})
+            result = self._execute_command(
+                step="regression",
+                command_template=self.contract.regression_command,
+                context=context,
+                log_path=None,
+                cwd=workdir,
+                extra_env=extra_env,
+                timeout_seconds=self.contract.regression_timeout_seconds,
+            )
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, file=sys.stderr, end="")
+            return result.returncode
+
+        tests = self._filter_tests_by_suite(self.discover_tests(), suite)
+        if not tests:
+            print("No regression tests found", file=sys.stderr)
+            return 1
+
+        failures: List[str] = []
+        for index, test_name in enumerate(tests, 1):
+            test_path = self.resolve_test_root() / test_name
+            context = self._command_context(mode=mode, target_binary=str(resolved_target_binary))
+            context.update(
+                {
+                    "suite": suite or "",
+                    "workers": str(worker_count),
+                    "test_file": test_name,
+                    "test_path": str(test_path.resolve()),
+                }
+            )
+            result = self._execute_command(
+                step="regression",
+                command_template=self.contract.regression_command,
+                context=context,
+                log_path=None,
+                cwd=workdir,
+                extra_env=extra_env,
+                timeout_seconds=self.contract.regression_timeout_seconds,
+            )
+            if result.returncode == 0:
+                print(f"✅ {index}/{len(tests)} {test_name}")
+                continue
+            print(f"❌ {index}/{len(tests)} {test_name} - exit code {result.returncode}")
+            if result.stdout.strip():
+                print(result.stdout.rstrip())
+            if result.stderr.strip():
+                print(result.stderr.rstrip(), file=sys.stderr)
+            failures.append(test_name)
+
+        if failures:
+            print(f"Regression failures: {len(failures)}", file=sys.stderr)
+            for failure in failures:
+                print(f"  - {failure}", file=sys.stderr)
+            return 1
+
+        print("All regression tests completed successfully")
+        return 0
+
+    def prepare_commit(
+        self,
+        *,
+        commit_hash: str,
+        coverage_json: str | Path,
+        compile_commands: Optional[str | Path] = None,
+        output_matrix: Optional[str | Path] = None,
+        tests_per_job: int = 1,
+        max_jobs: Optional[int] = None,
+    ) -> CommandExecutionResult:
+        if not self.contract.commit_prepare_command:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="commit preparation",
+                message="contract does not declare a commit preparation command",
+                issues_url=self.contract.resolved_issues_url,
+                hint=f"add `commit_prepare_command` to `{self.contract.contract_path.name}`",
+                category="bad contract problem",
+            )
+
+        context = self._command_context(mode="instrumentation")
+        argv = self._parse_command_template(
+            self.contract.commit_prepare_command,
+            context,
+            step="commit preparation",
+            hint=f"fix `commit_prepare_command` in `{self.contract.contract_path.name}`",
+        )
+        argv.append(commit_hash)
+        argv.extend(["--coverage-json", str(self._resolve_user_path(coverage_json))])
+
+        resolved_compile_commands = self._resolve_compile_commands_path(compile_commands)
+        if resolved_compile_commands is not None:
+            argv.extend(["--compile-commands", str(resolved_compile_commands)])
+
+        if output_matrix is not None:
+            argv.extend(["--output-matrix", str(self._resolve_user_path(output_matrix))])
+            argv.extend(["--tests-per-job", str(tests_per_job)])
+            if max_jobs is not None:
+                argv.extend(["--max-jobs", str(max_jobs)])
+
+        return self._execute_argv(
+            argv=argv,
+            log_path=None,
+            cwd=self.brain_root,
+            extra_env={},
+            timeout_seconds=None,
+        )
+
+    def prepare_commit_history(
+        self,
+        *,
+        commits_to_analyze: int,
+        coverage_json: str | Path,
+        commit_hash: Optional[str] = None,
+        compile_commands: Optional[str | Path] = None,
+        output_matrix: Optional[str | Path] = None,
+        tests_per_job: int = 1,
+        max_jobs: Optional[int] = None,
+        skip_coverage_enforcement: bool = False,
+        min_overall_coverage: int = 80,
+    ) -> int:
+        if commits_to_analyze < 1:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="commit preparation",
+                message="commits_to_analyze must be a positive integer",
+                issues_url=self.contract.resolved_issues_url,
+                hint="pass a value >= 1",
+                category="bad contract problem",
+            )
+
+        commits = [commit_hash] if commit_hash else self._recent_commits(commits_to_analyze)
+        if not commits:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="commit preparation",
+                message="no commits found in git history",
+                issues_url=self.contract.resolved_issues_url,
+                hint="check out a repository with commit history before preparing commit fuzzing",
+                category="environment problem",
+            )
+
+        total_functions = 0
+        total_with = 0
+        total_without = 0
+
+        for index, current_commit in enumerate(commits, 1):
+            print("==========================================")
+            print(f"ANALYZING COMMIT {index}/{len(commits)}")
+            print("==========================================")
+            print(f"Commit: {current_commit}")
+
+            result = self.prepare_commit(
+                commit_hash=current_commit,
+                coverage_json=coverage_json,
+                compile_commands=compile_commands,
+                output_matrix=output_matrix if len(commits) == 1 else None,
+                tests_per_job=tests_per_job,
+                max_jobs=max_jobs,
+            )
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, file=sys.stderr, end="")
+            if result.returncode != 0:
+                return result.returncode
+
+            summary_match = _SUMMARY_RE.search(result.stdout)
+            if summary_match:
+                total_functions += int(summary_match.group("total"))
+                total_with += int(summary_match.group("with"))
+                total_without += int(summary_match.group("without"))
+            print("")
+
+        overall_coverage = (100.0 * total_with / total_functions) if total_functions else 0.0
+        print("==========================================")
+        print("Analysis complete!")
+        print("==========================================")
+        print(
+            "OVERALL SUMMARY: "
+            f"commits={len(commits)}; "
+            f"total_functions={total_functions}; "
+            f"with_coverage={total_with}; "
+            f"without_coverage={total_without}; "
+            f"overall_coverage={overall_coverage:.1f}%"
+        )
+
+        if not skip_coverage_enforcement and int(overall_coverage) < min_overall_coverage:
+            print(
+                f"Minimum overall coverage ({min_overall_coverage}%) not met: "
+                f"{overall_coverage:.1f}%"
+            )
+            return 2
+        return 0
+
     def render_target_commands(
         self,
         *,
@@ -510,10 +1020,22 @@ class SolverFuzzingBrain:
         )
         return self._resolve_path_value(configured, self.layout.solver_workspace)
 
+    def resolve_build_directory(self, *, mode: str) -> Path:
+        binary_path = self.resolve_binary(mode=mode)
+        if binary_path.parent.name == "bin":
+            return binary_path.parent.parent
+        return binary_path.parent
+
     def resolve_test_root(self) -> Path:
         if not self.contract.test_root:
             return self.layout.tests_workspace
         return self._resolve_path_value(self.contract.test_root, self.layout.tests_workspace)
+
+    def resolve_regression_working_directory(self) -> Path:
+        configured = self.contract.regression_working_directory
+        if not configured:
+            return self.layout.solver_workspace
+        return self._resolve_path_value(configured, self.layout.solver_workspace)
 
     def resolve_commit_hash(self, repository_root: Path) -> Optional[str]:
         if not (repository_root / ".git").exists():
@@ -964,6 +1486,9 @@ class SolverFuzzingBrain:
         command_template: str,
         context: Dict[str, str],
         log_path: Optional[Path],
+        cwd: Optional[Path] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> CommandExecutionResult:
         argv = self._parse_command_template(
             command_template,
@@ -971,6 +1496,23 @@ class SolverFuzzingBrain:
             step=step,
             hint=f"fix `{step}` command in `{self.contract.contract_path.name}`",
         )
+        return self._execute_argv(
+            argv=argv,
+            log_path=log_path,
+            cwd=cwd or self.brain_root,
+            extra_env=extra_env or {},
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _execute_argv(
+        self,
+        *,
+        argv: Sequence[str],
+        log_path: Optional[Path],
+        cwd: Path,
+        extra_env: Dict[str, str],
+        timeout_seconds: Optional[int],
+    ) -> CommandExecutionResult:
         environment = os.environ.copy()
         environment.update(
             {
@@ -981,30 +1523,41 @@ class SolverFuzzingBrain:
                 "PYTHONPATH": self._pythonpath_with_root(os.environ.get("PYTHONPATH")),
             }
         )
+        environment.update(extra_env)
 
-        result = subprocess.run(
-            argv,
-            cwd=self.brain_root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                list(argv),
+                cwd=cwd,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+            stdout = result.stdout
+            stderr = result.stderr
+            returncode = result.returncode
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            returncode = 124
+
         if log_path:
             self._write_command_log(
                 log_path=log_path,
-                argv=argv,
-                cwd=self.brain_root,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                argv=list(argv),
+                cwd=cwd,
+                stdout=stdout,
+                stderr=stderr,
             )
 
         return CommandExecutionResult(
-            argv=argv,
-            cwd=self.brain_root,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            returncode=result.returncode,
+            argv=list(argv),
+            cwd=cwd,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=returncode,
             log_path=log_path,
         )
 
@@ -1017,12 +1570,18 @@ class SolverFuzzingBrain:
         log_path: Optional[Path],
         category: str,
         hint: str,
+        cwd: Optional[Path] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> CommandExecutionResult:
         result = self._execute_command(
             step=step,
             command_template=command_template,
             context=context,
             log_path=log_path,
+            cwd=cwd,
+            extra_env=extra_env,
+            timeout_seconds=timeout_seconds,
         )
         if result.returncode != 0:
             raise BrainError(
@@ -1071,6 +1630,62 @@ class SolverFuzzingBrain:
             return str(self.brain_root)
         return f"{self.brain_root}{os.pathsep}{current}"
 
+    def _resolve_user_path(self, value: str | Path) -> Path:
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return candidate.resolve()
+        return (Path.cwd() / candidate).resolve()
+
+    def _resolve_compile_commands_path(
+        self,
+        compile_commands: Optional[str | Path],
+    ) -> Optional[Path]:
+        if compile_commands is not None:
+            return self._resolve_user_path(compile_commands)
+
+        build_dir = self.layout.solver_workspace / "build"
+        compile_commands_json = build_dir / "compile_commands.json"
+        if compile_commands_json.exists():
+            return compile_commands_json.resolve()
+        if build_dir.exists():
+            return build_dir.resolve()
+        return None
+
+    def _recent_commits(self, limit: int) -> List[str]:
+        result = subprocess.run(
+            ["git", "log", "--format=%H", "-n", str(limit)],
+            cwd=self.layout.solver_workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def _environment_assignments(self, entries: Sequence[str]) -> Dict[str, str]:
+        assignments: Dict[str, str] = {}
+        for entry in entries:
+            key, separator, value = entry.partition("=")
+            if not separator:
+                assignments[key] = os.environ.get(key, "")
+            else:
+                assignments[key] = value
+        return assignments
+
+    def _filter_tests_by_suite(self, tests: Sequence[str], suite: Optional[str]) -> List[str]:
+        if not suite:
+            return list(tests)
+        normalized = Path(suite).as_posix().lstrip("./")
+        for prefix in ("test/regression/", "regression/"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+        return [
+            test_name
+            for test_name in tests
+            if test_name == normalized or test_name.startswith(f"{normalized}/")
+        ]
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Contract-driven solver fuzzing brain")
@@ -1097,6 +1712,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     build = subparsers.add_parser("build", help="Run the configured build and optionally collect artifacts")
     build.add_argument("--mode", choices=["production", "instrumentation"], required=True)
+    build.add_argument("--build-arg", action="append", default=[])
     build.add_argument("--artifacts-dir", default=None)
     build.add_argument("--artifact-archive", default=None)
     build.add_argument("--upload-s3", action="store_true")
@@ -1125,6 +1741,42 @@ def _build_parser() -> argparse.ArgumentParser:
     matrix.add_argument("--max-jobs", type=int, default=None)
     matrix.add_argument("--output", default=None)
 
+    coverage_matrix = subparsers.add_parser(
+        "coverage-matrix",
+        help="Build a coverage-mapping shard matrix from contract-driven discovery",
+    )
+    coverage_matrix.add_argument("--max-job-time", type=int, default=60)
+    coverage_matrix.add_argument("--buffer", type=int, default=10)
+    coverage_matrix.add_argument("--avg-test-time", type=float, default=None)
+    coverage_matrix.add_argument("--target-jobs", type=int, default=None)
+    coverage_matrix.add_argument("--output", default=None)
+
+    coverage_shard = subparsers.add_parser(
+        "run-coverage-shard",
+        help="Run the contract-declared coverage mapper for one shard",
+    )
+    coverage_shard.add_argument("--start-index", type=int, required=True)
+    coverage_shard.add_argument("--end-index", type=int, required=True)
+    coverage_shard.add_argument("--output", default=None)
+    coverage_shard.add_argument("--reference-binary", default=None)
+    coverage_shard.add_argument("--log-path", default=None)
+    coverage_shard.add_argument("--json", action="store_true")
+
+    coverage_join = subparsers.add_parser(
+        "join-coverage",
+        help="Merge downloaded coverage shard mappings into one mapping artifact",
+    )
+    coverage_join.add_argument("--mappings-dir", required=True)
+    coverage_join.add_argument("--output", default="coverage_mapping.json")
+    coverage_join.add_argument("--no-gzip", action="store_true")
+    coverage_join.add_argument("--json", action="store_true")
+
+    count_tests = subparsers.add_parser(
+        "count-tests",
+        help="Count tests through contract-driven discovery and emit metadata",
+    )
+    count_tests.add_argument("--json", action="store_true")
+
     harness = subparsers.add_parser("run-harness", help="Run the shared commit harness from the contract")
     harness.add_argument("--tests-json", required=True)
     harness.add_argument("--tests-root", default=None)
@@ -1147,6 +1799,37 @@ def _build_parser() -> argparse.ArgumentParser:
     oracle.add_argument("--target-binary", default=None)
     oracle.add_argument("--reference-binary", default=None)
     oracle.add_argument("--log-path", default=None)
+
+    prepare_commit = subparsers.add_parser(
+        "prepare-commit",
+        help="Run the contract-declared commit preparation command for one commit",
+    )
+    prepare_commit.add_argument("commit")
+    prepare_commit.add_argument("--coverage-json", required=True)
+    prepare_commit.add_argument("--compile-commands", default=None)
+    prepare_commit.add_argument("--output-matrix", default=None)
+    prepare_commit.add_argument("--tests-per-job", type=int, default=1)
+    prepare_commit.add_argument("--max-jobs", type=int, default=None)
+
+    prepare_commits = subparsers.add_parser(
+        "prepare-commits",
+        help="Run the shared commit-preparation history loop for the contract",
+    )
+    prepare_commits.add_argument("commits_to_analyze", type=int)
+    prepare_commits.add_argument("--coverage-json", required=True)
+    prepare_commits.add_argument("--commit-hash", default=None)
+    prepare_commits.add_argument("--compile-commands", default=None)
+    prepare_commits.add_argument("--output-matrix", default=None)
+    prepare_commits.add_argument("--tests-per-job", type=int, default=1)
+    prepare_commits.add_argument("--max-jobs", type=int, default=None)
+    prepare_commits.add_argument("--skip-coverage-enforcement", action="store_true")
+    prepare_commits.add_argument("--min-overall-coverage", type=int, default=80)
+
+    regression = subparsers.add_parser("run-regression", help="Run contract-driven regression execution")
+    regression.add_argument("--suite", default=None)
+    regression.add_argument("--mode", choices=["production", "instrumentation"], default="production")
+    regression.add_argument("--target-binary", default=None)
+    regression.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1))
 
     upload = subparsers.add_parser("upload-artifact", help="Upload an existing artifact to S3")
     upload.add_argument("--source", required=True)
@@ -1184,9 +1867,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "artifact_s3_bucket": brain.contract.artifact_s3_bucket,
                 "artifact_s3_prefix": brain.contract.artifact_s3_prefix,
                 "build_command": brain.contract.build_command,
+                "commit_prepare_command": brain.contract.commit_prepare_command,
                 "contract_path": str(brain.contract.contract_path),
+                "coverage_average_test_time_seconds": brain.contract.coverage_average_test_time_seconds,
                 "coverage_binary_path": brain.contract.coverage_binary_path,
                 "coverage_build_command": brain.contract.coverage_build_command,
+                "coverage_mapper_command": brain.contract.coverage_mapper_command,
+                "coverage_target_job_count": brain.contract.coverage_target_job_count,
                 "environment_requirements": {
                     "env": list(brain.contract.environment_requirements.env),
                     "packages": list(brain.contract.environment_requirements.packages),
@@ -1194,6 +1881,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "issues_url": brain.contract.resolved_issues_url,
                 "oracle_command": brain.contract.oracle_command,
                 "production_binary_path": brain.contract.production_binary_path,
+                "regression_command": brain.contract.regression_command,
+                "regression_environment": list(brain.contract.regression_environment),
+                "regression_kind": brain.contract.regression_kind,
+                "regression_timeout_seconds": brain.contract.regression_timeout_seconds,
+                "regression_working_directory": brain.contract.regression_working_directory,
                 "repository_path": brain.contract.repository_path,
                 "repository_url": brain.contract.repository_url,
                 "solver_name": brain.contract.solver_name,
@@ -1214,6 +1906,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "build":
             result = brain.build(
                 mode=args.mode,
+                extra_args=args.build_arg,
                 artifacts_dir=args.artifacts_dir,
                 artifact_archive=args.artifact_archive,
                 upload_s3=args.upload_s3,
@@ -1258,6 +1951,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(result.artifact_archive)
             return 0
 
+        if args.command == "count-tests":
+            payload = brain.count_tests()
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(json.dumps(payload))
+            return 0
+
         if args.command == "discover-tests":
             tests = brain.discover_tests(log_path=args.log_path)
             if args.json:
@@ -1283,6 +1984,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"✅ Matrix written to {output_path}")
             else:
                 print(json.dumps(matrix_payload, indent=2))
+            return 0
+
+        if args.command == "coverage-matrix":
+            matrix_payload = brain.build_coverage_matrix(
+                max_job_time_minutes=args.max_job_time,
+                buffer_minutes=args.buffer,
+                avg_test_time_seconds=args.avg_test_time,
+                target_jobs=args.target_jobs,
+            )
+            if args.output:
+                output_path = Path(args.output).resolve()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(
+                    json.dumps(matrix_payload, indent=2, sort_keys=False) + "\n",
+                    encoding="utf-8",
+                )
+                print(f"✅ Matrix written to {output_path}")
+            else:
+                print(json.dumps(matrix_payload, indent=2))
+            return 0
+
+        if args.command == "run-coverage-shard":
+            output = brain.run_coverage_shard(
+                start_index=args.start_index,
+                end_index=args.end_index,
+                output_path=args.output,
+                reference_binary=args.reference_binary,
+                log_path=args.log_path,
+            )
+            payload = {"output_path": str(output)}
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(output)
+            return 0
+
+        if args.command == "join-coverage":
+            output_path, gzip_path = brain.join_coverage_mappings(
+                mappings_dir=args.mappings_dir,
+                output_path=args.output,
+                gzip_output=not args.no_gzip,
+            )
+            payload = {
+                "output_path": str(output_path),
+                "gzip_path": str(gzip_path) if gzip_path else None,
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            elif gzip_path is not None:
+                print(gzip_path)
+            else:
+                print(output_path)
             return 0
 
         if args.command == "run-harness":
@@ -1316,6 +2069,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if result.stderr:
                 print(result.stderr, file=sys.stderr, end="")
             return result.returncode
+
+        if args.command == "prepare-commit":
+            result = brain.prepare_commit(
+                commit_hash=args.commit,
+                coverage_json=args.coverage_json,
+                compile_commands=args.compile_commands,
+                output_matrix=args.output_matrix,
+                tests_per_job=args.tests_per_job,
+                max_jobs=args.max_jobs,
+            )
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, file=sys.stderr, end="")
+            return result.returncode
+
+        if args.command == "prepare-commits":
+            return brain.prepare_commit_history(
+                commits_to_analyze=args.commits_to_analyze,
+                coverage_json=args.coverage_json,
+                commit_hash=args.commit_hash,
+                compile_commands=args.compile_commands,
+                output_matrix=args.output_matrix,
+                tests_per_job=args.tests_per_job,
+                max_jobs=args.max_jobs,
+                skip_coverage_enforcement=args.skip_coverage_enforcement,
+                min_overall_coverage=args.min_overall_coverage,
+            )
+
+        if args.command == "run-regression":
+            return brain.run_regression(
+                suite=args.suite,
+                mode=args.mode,
+                target_binary=args.target_binary,
+                workers=args.workers,
+            )
 
         if args.command == "upload-artifact":
             upload_target = brain.upload_to_s3(

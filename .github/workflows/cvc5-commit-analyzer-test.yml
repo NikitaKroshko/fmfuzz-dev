@@ -101,14 +101,13 @@ jobs:
           ls -la coverage_mapping.json
 
       - name: Run Commit Fuzzer
-        working-directory: cvc5
         env:
-          SKIP_COVERAGE_ENFORCEMENT: "false"
-          MIN_OVERALL_COVERAGE: "80"
         run: |
-          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh \
-            --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py \
-            --coverage-file ../coverage_mapping.json \
-            --compile-commands build \
-            50
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            prepare-commits \
+            50 \
+            --coverage-json coverage_mapping.json \
+            --compile-commands cvc5/build \
+            --min-overall-coverage 80
      

@@ -403,7 +403,14 @@ class CoverageMapper:
         return str(temp_file)
 
 
-    def run(self, max_tests: int = None, test_pattern: str = None, start_index: int = None, end_index: int = None):
+    def run(
+        self,
+        max_tests: int = None,
+        test_pattern: str = None,
+        start_index: int = None,
+        end_index: int = None,
+        output_path: str = None,
+    ):
         """Main execution method"""
         print("🔍 Discovering tests...")
         sys.stdout.flush()
@@ -441,7 +448,14 @@ class CoverageMapper:
             return
         
         # Move temp file to final location
-        output_file = f"coverage_mapping_{start_index}_{end_index}.json" if start_index is not None else "coverage_mapping.json"
+        output_file = (
+            output_path
+            or (
+                f"coverage_mapping_{start_index}_{end_index}.json"
+                if start_index is not None
+                else "coverage_mapping.json"
+            )
+        )
         Path(temp_file).rename(output_file)
         
         # Get stats from the final file
@@ -462,13 +476,19 @@ def main():
     parser.add_argument('--test-pattern', help='Filter tests by pattern')
     parser.add_argument('--start-index', type=int, help='Start index for test range (1-based)')
     parser.add_argument('--end-index', type=int, help='End index for test range (1-based, inclusive)')
+    parser.add_argument('--output', default=None, help='Output JSON file path')
     
     args = parser.parse_args()
     
     try:
         mapper = CoverageMapper(args.build_dir, args.z3test_dir, args.cvc5_path)
-        mapper.run(max_tests=args.max_tests, test_pattern=args.test_pattern, 
-                   start_index=args.start_index, end_index=args.end_index)
+        mapper.run(
+            max_tests=args.max_tests,
+            test_pattern=args.test_pattern,
+            start_index=args.start_index,
+            end_index=args.end_index,
+            output_path=args.output,
+        )
     except KeyboardInterrupt:
         # Handle Ctrl+C gracefully
         print("\n⚠️ Interrupted by user")
@@ -482,4 +502,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

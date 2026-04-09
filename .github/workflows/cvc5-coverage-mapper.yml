@@ -87,10 +87,9 @@ jobs:
       - name: Generate dynamic matrix
         id: generate-matrix
         run: |
-          python3 scripts/cvc5/coverage/generate_matrix.py \
-            --build-dir cvc5/build \
-            --max-job-time 60 \
-            --buffer 10 \
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            coverage-matrix \
             --output matrix.json
 
           MATRIX=$(jq -c '.matrix' matrix.json)
@@ -154,9 +153,13 @@ jobs:
       - name: Run coverage analysis (tests ${{ matrix.start_index }}-${{ matrix.end_index }})
         run: |
           ${{ github.workspace }}/scripts/measure_time.sh \
-            ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh \
-            ${{ matrix.start_index }} \
-            ${{ matrix.end_index }}
+            python3 \
+            ${{ github.workspace }}/scripts/solver_fuzzing_brain.py \
+            --contract ${{ github.workspace }}/contracts/solvers/cvc5.yml \
+            run-coverage-shard \
+            --start-index ${{ matrix.start_index }} \
+            --end-index ${{ matrix.end_index }} \
+            --output ${{ github.workspace }}/cvc5/build/coverage_mapping_${{ matrix.start_index }}_${{ matrix.end_index }}.json
 
       - name: Upload coverage mapping
         uses: actions/upload-artifact@v4
@@ -193,7 +196,11 @@ jobs:
 
       - name: Join coverage mappings
         run: |
-          python3 scripts/cvc5/coverage/join_coverage_mappings.py
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            join-coverage \
+            --mappings-dir coverage-mappings \
+            --output coverage_mapping.json
 
       - name: Upload final coverage mapping artifact
         uses: actions/upload-artifact@v4

@@ -89,7 +89,14 @@ jobs:
 
       - name: Build CVC5 production binary
         run: |
-          ./scripts/cvc5/build.sh --static
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            build \
+            --mode production \
+            --build-arg=--static \
+            --artifacts-dir .artifacts-production \
+            --artifact-archive cvc5/build/artifacts-production.tar.gz \
+            --json > production-build.json
 
       - name: Get commit hash
         id: get-commit
@@ -98,15 +105,6 @@ jobs:
           COMMIT_HASH=$(git rev-parse HEAD)
           echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "CVC5 commit hash: $COMMIT_HASH"
-
-      - name: Archive production artifacts from contract
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/cvc5.yml \
-            collect-artifacts \
-            --artifacts-dir .artifacts-production \
-            --artifact-archive cvc5/build/artifacts-production.tar.gz \
-            --json > production-artifacts.json
 
       - name: Install LLVM/Clang 17 for coverage build
         uses: KyleMayes/install-llvm-action@v2
@@ -124,16 +122,14 @@ jobs:
         run: |
           export CXX="clang++ --gcc-toolchain=/usr"
           export CC="clang --gcc-toolchain=/usr"
-          ./scripts/cvc5/build.sh --static --coverage
-
-      - name: Archive coverage artifacts from contract
-        run: |
           python3 scripts/solver_fuzzing_brain.py \
             --contract contracts/solvers/cvc5.yml \
-            collect-artifacts \
+            build \
+            --mode instrumentation \
+            --build-arg=--static \
             --artifacts-dir .artifacts-coverage \
             --artifact-archive cvc5/build/artifacts-coverage.tar.gz \
-            --json > coverage-artifacts.json
+            --json > coverage-build.json
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0

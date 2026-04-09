@@ -174,7 +174,7 @@ class CommitHarnessTests(unittest.TestCase):
         self.assertEqual(fake_manager.fuzz_queue, ["commit-c"])
         self.assertEqual(fake_manager.updated_commits, [])
 
-    def test_commit_wrappers_analyze_requested_history(self) -> None:
+    def test_prepare_commits_analyzes_requested_history(self) -> None:
         workspace_root = Path(__file__).resolve().parents[1]
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,74 +213,85 @@ class CommitHarnessTests(unittest.TestCase):
                 encoding="utf-8",
             )
             stub_script.chmod(0o755)
-
-            wrapper_specs = [
-                (
-                    "cvc5",
-                    workspace_root / "scripts" / "cvc5" / "commit_fuzzer" / "run_prepare_commit_fuzzer.sh",
-                    "CVC5_COMMIT_HASH",
+            contract_path = workdir / "solver.yml"
+            contract_path.write_text(
+                textwrap.dedent(
+                    f"""\
+                    solver_name: demo
+                    repository_url: https://github.com/example/demo.git
+                    repository_path: repo
+                    build_command: /bin/true
+                    coverage_build_command: /bin/true
+                    production_binary_path: build/demo
+                    coverage_binary_path: build/demo
+                    test_root: .
+                    test_discovery_command: null
+                    target_commands:
+                      - "{{target_binary}}"
+                    oracle_command: null
+                    commit_prepare_command: {stub_script}
+                    environment_requirements:
+                      packages: []
+                      env: []
+                    artifact_paths: []
+                    artifact_s3_bucket: null
+                    artifact_s3_prefix: null
+                    """
                 ),
-                (
-                    "opensmt",
-                    workspace_root / "scripts" / "opensmt" / "commit_fuzzer" / "run_prepare_commit_fuzzer.sh",
-                    "OPENSMT_COMMIT_HASH",
-                ),
-                (
-                    "z3",
-                    workspace_root / "scripts" / "z3" / "commit_fuzzer" / "run_prepare_commit_fuzzer.sh",
-                    "Z3_COMMIT_HASH",
-                ),
-            ]
-
-            for name, script_path, _commit_env_var in wrapper_specs:
-                invocation_log = workdir / f"{name}-invocations.txt"
-                env = os.environ.copy()
-                env["INVOCATION_LOG"] = str(invocation_log)
-                result = subprocess.run(
-                    [
-                        "bash",
-                        str(script_path),
-                        "3",
-                        "--python-script",
-                        str(stub_script),
-                        "--coverage-file",
-                        str(coverage_file),
-                    ],
-                    cwd=repo_root,
-                    env=env,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-
-                self.assertEqual(
-                    result.returncode,
-                    0,
-                    msg=f"{name} wrapper failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
-                )
-                self.assertEqual(invocation_log.read_text(encoding="utf-8").splitlines(), expected_commits)
-                self.assertIn(
-                    "OVERALL SUMMARY: commits=3; total_functions=3; with_coverage=3; without_coverage=0; overall_coverage=100.0%",
-                    result.stdout,
-                )
-
-            override_log = workdir / "cvc5-override-invocations.txt"
-            override_env = os.environ.copy()
-            override_env.update(
-                {
-                    "INVOCATION_LOG": str(override_log),
-                    "CVC5_COMMIT_HASH": expected_commits[1],
-                }
+                encoding="utf-8",
             )
+
+            invocation_log = workdir / "invocations.txt"
+            env = os.environ.copy()
+            env["INVOCATION_LOG"] = str(invocation_log)
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(workspace_root / "scripts" / "solver_fuzzing_brain.py"),
+                    "--contract",
+                    str(contract_path),
+                    "--workspace-root",
+                    str(workdir),
+                    "prepare-commits",
+                    "3",
+                    "--coverage-json",
+                    str(coverage_file),
+                ],
+                cwd=repo_root,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"prepare-commits failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            self.assertEqual(invocation_log.read_text(encoding="utf-8").splitlines(), expected_commits)
+            self.assertIn(
+                "OVERALL SUMMARY: commits=3; total_functions=3; with_coverage=3; without_coverage=0; overall_coverage=100.0%",
+                result.stdout,
+            )
+
+            override_log = workdir / "override-invocations.txt"
+            override_env = os.environ.copy()
+            override_env["INVOCATION_LOG"] = str(override_log)
             override_result = subprocess.run(
                 [
-                    "bash",
-                    str(wrapper_specs[0][1]),
+                    "python3",
+                    str(workspace_root / "scripts" / "solver_fuzzing_brain.py"),
+                    "--contract",
+                    str(contract_path),
+                    "--workspace-root",
+                    str(workdir),
+                    "prepare-commits",
                     "5",
-                    "--python-script",
-                    str(stub_script),
-                    "--coverage-file",
+                    "--coverage-json",
                     str(coverage_file),
+                    "--commit-hash",
+                    expected_commits[1],
                 ],
                 cwd=repo_root,
                 env=override_env,
@@ -291,7 +302,7 @@ class CommitHarnessTests(unittest.TestCase):
             self.assertEqual(
                 override_result.returncode,
                 0,
-                msg=f"cvc5 override wrapper failed\nstdout:\n{override_result.stdout}\nstderr:\n{override_result.stderr}",
+                msg=f"prepare-commits override failed\nstdout:\n{override_result.stdout}\nstderr:\n{override_result.stderr}",
             )
             self.assertEqual(override_log.read_text(encoding="utf-8").splitlines(), [expected_commits[1]])
             self.assertIn(
@@ -384,9 +395,9 @@ index 1111111..2222222 100644
         repo_root = Path(__file__).resolve().parents[1]
 
         workflow_expectations = {
-            "z3-coverage-mapper.yml": 'git checkout "${{ needs.discover-tests.outputs.commit_hash }}"',
+            "z3-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
             "cvc5-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
-            "opensmt-coverage-mapper.yml": 'git checkout "${{ needs.discover-tests.outputs.commit_hash }}"',
+            "opensmt-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
         }
 
         for workflow_name, replay_step in workflow_expectations.items():
@@ -413,7 +424,7 @@ index 1111111..2222222 100644
 
         rq2_build_text = (repo_root / ".github" / "workflows" / "cvc5-evaluation-rq2-build.yml").read_text(encoding="utf-8")
         rq2_coverage_text = (repo_root / ".github" / "workflows" / "cvc5-evaluation-rq2-coverage-mapping.yml").read_text(encoding="utf-8")
-        self.assertIn("collect-artifacts", rq2_build_text)
+        self.assertIn("--artifact-archive cvc5/build/artifacts-production.tar.gz", rq2_build_text)
         self.assertNotIn("scripts/cvc5/collect_build_artifacts.sh", rq2_build_text)
         self.assertNotIn("scripts/cvc5/extract_build_artifacts.sh", rq2_coverage_text)
         self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C cvc5", rq2_coverage_text)
@@ -425,7 +436,29 @@ index 1111111..2222222 100644
         regression_text = (repo_root / ".github" / "workflows" / "opensmt-regression.yml").read_text(encoding="utf-8")
         self.assertIn("scripts/solver_fuzzing_brain.py", commit_fuzzer_text)
         self.assertIn("contracts/solvers/opensmt.yml", commit_fuzzer_text)
-        self.assertIn("run_regression_tests.sh", regression_text)
+        self.assertIn("run-regression", regression_text)
+
+    def test_deleted_legacy_helpers_are_absent(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        deleted_paths = [
+            "scripts/cvc5/coverage/generate_matrix.py",
+            "scripts/cvc5/coverage/join_coverage_mappings.py",
+            "scripts/cvc5/coverage/run_coverage_builder.sh",
+            "scripts/z3/coverage/generate_matrix.py",
+            "scripts/z3/coverage/join_coverage_mappings.py",
+            "scripts/z3/coverage/run_coverage_builder.sh",
+            "scripts/opensmt/coverage/generate_matrix.py",
+            "scripts/opensmt/coverage/join_coverage_mappings.py",
+            "scripts/opensmt/coverage/run_coverage_builder.sh",
+            "scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh",
+            "scripts/z3/commit_fuzzer/run_prepare_commit_fuzzer.sh",
+            "scripts/opensmt/commit_fuzzer/run_prepare_commit_fuzzer.sh",
+            "scripts/cvc5/run_regression_tests.sh",
+            "scripts/opensmt/run_regression_tests.sh",
+            "scripts/opensmt/run_regression_tests.py",
+        ]
+        for relative_path in deleted_paths:
+            self.assertFalse((repo_root / relative_path).exists(), msg=relative_path)
 
     def test_z3_and_opensmt_rq2_workflows_drop_legacy_artifact_helpers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -436,13 +469,13 @@ index 1111111..2222222 100644
         opensmt_coverage_text = (repo_root / ".github" / "workflows" / "opensmt-evaluation-rq2-coverage-mapping.yml").read_text(encoding="utf-8")
 
         self.assertIn("contracts/solvers/z3.yml", z3_build_text)
-        self.assertIn("collect-artifacts", z3_build_text)
+        self.assertIn("--artifact-archive z3/build/artifacts-production.tar.gz", z3_build_text)
         self.assertNotIn("scripts/z3/collect_build_artifacts.sh", z3_build_text)
         self.assertNotIn("scripts/z3/extract_build_artifacts.sh", z3_coverage_text)
         self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C z3", z3_coverage_text)
 
         self.assertIn("contracts/solvers/opensmt.yml", opensmt_build_text)
-        self.assertIn("collect-artifacts", opensmt_build_text)
+        self.assertIn("--artifact-archive artifacts-production.tar.gz", opensmt_build_text)
         self.assertNotIn("scripts/opensmt/collect_build_artifacts.sh", opensmt_build_text)
         self.assertNotIn("scripts/opensmt/extract_build_artifacts.sh", opensmt_coverage_text)
         self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C opensmt", opensmt_coverage_text)

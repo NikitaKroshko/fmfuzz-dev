@@ -50,5 +50,10 @@ jobs:
 
       - name: Run ${{ matrix.shard }} tests with timing
         run: |
-          cd cvc5/build
-          ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh "${{ matrix.shard }}"
+          ${{ github.workspace }}/scripts/measure_time.sh \
+            python3 \
+            ${{ github.workspace }}/scripts/solver_fuzzing_brain.py \
+            --contract ${{ github.workspace }}/contracts/solvers/cvc5.yml \
+            run-regression \
+            --mode instrumentation \
+            --suite "${{ matrix.shard }}"

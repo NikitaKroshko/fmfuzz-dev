@@ -89,7 +89,14 @@ jobs:
 
       - name: Build OpenSMT production binary
         run: |
-          bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            build \
+            --mode production \
+            --build-arg=--static \
+            --artifacts-dir .artifacts-production \
+            --artifact-archive artifacts-production.tar.gz \
+            --json > production-build.json
 
       - name: Get commit hash
         id: get-commit
@@ -99,27 +106,16 @@ jobs:
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           echo "OpenSMT commit hash: $COMMIT_HASH"
 
-      - name: Archive production artifacts from contract
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/opensmt.yml \
-            collect-artifacts \
-            --artifacts-dir .artifacts-production \
-            --artifact-archive artifacts-production.tar.gz \
-            --json > production-artifacts.json
-
       - name: Build OpenSMT coverage binary
         run: |
-          bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static --coverage
-
-      - name: Archive coverage artifacts from contract
-        run: |
           python3 scripts/solver_fuzzing_brain.py \
             --contract contracts/solvers/opensmt.yml \
-            collect-artifacts \
+            build \
+            --mode instrumentation \
+            --build-arg=--static \
             --artifacts-dir .artifacts-coverage \
             --artifact-archive artifacts-coverage.tar.gz \
-            --json > coverage-artifacts.json
+            --json > coverage-build.json
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0
