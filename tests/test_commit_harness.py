@@ -413,6 +413,7 @@ index 1111111..2222222 100644
         workflow_names = [
             "cvc5-coverage-mapper.yml",
             "cvc5-coverage-daily-check.yml",
+            "cvc5-commit-fuzzer.yml",
             "cvc5-regression.yml",
             "cvc5-evaluation-rq2-build.yml",
             "cvc5-commit-analyzer-test.yml",
@@ -429,13 +430,24 @@ index 1111111..2222222 100644
         self.assertNotIn("scripts/cvc5/extract_build_artifacts.sh", rq2_coverage_text)
         self.assertIn("tar -xzf artifacts/artifacts.tar.gz -C cvc5", rq2_coverage_text)
 
-    def test_opensmt_commit_and_regression_workflows_use_contract_brain(self) -> None:
+    def test_commit_fuzzer_workflows_use_shared_harness(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
 
-        commit_fuzzer_text = (repo_root / ".github" / "workflows" / "opensmt-commit-fuzzer.yml").read_text(encoding="utf-8")
+        for solver in ("cvc5", "z3", "opensmt"):
+            commit_fuzzer_text = (
+                repo_root / ".github" / "workflows" / f"{solver}-commit-fuzzer.yml"
+            ).read_text(encoding="utf-8")
+            self.assertIn("scripts/solver_fuzzing_brain.py", commit_fuzzer_text)
+            self.assertIn(f"contracts/solvers/{solver}.yml", commit_fuzzer_text)
+            self.assertIn("run-harness", commit_fuzzer_text)
+            self.assertNotIn("simple_commit_fuzzer.py", commit_fuzzer_text)
+            self.assertNotIn("run_commit_fuzzer.py", commit_fuzzer_text)
+            self.assertNotIn(f"scripts/{solver}/commit_fuzzer", commit_fuzzer_text)
+
+    def test_opensmt_regression_workflow_uses_contract_brain(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
         regression_text = (repo_root / ".github" / "workflows" / "opensmt-regression.yml").read_text(encoding="utf-8")
-        self.assertIn("scripts/solver_fuzzing_brain.py", commit_fuzzer_text)
-        self.assertIn("contracts/solvers/opensmt.yml", commit_fuzzer_text)
         self.assertIn("run-regression", regression_text)
 
     def test_deleted_legacy_helpers_are_absent(self) -> None:
@@ -450,6 +462,7 @@ index 1111111..2222222 100644
             "scripts/opensmt/coverage/generate_matrix.py",
             "scripts/opensmt/coverage/join_coverage_mappings.py",
             "scripts/opensmt/coverage/run_coverage_builder.sh",
+            "scripts/cvc5/commit_fuzzer/simple_commit_fuzzer.py",
             "scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh",
             "scripts/z3/commit_fuzzer/run_prepare_commit_fuzzer.sh",
             "scripts/opensmt/commit_fuzzer/run_prepare_commit_fuzzer.sh",
