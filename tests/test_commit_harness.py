@@ -473,6 +473,26 @@ index 1111111..2222222 100644
         for relative_path in deleted_paths:
             self.assertFalse((repo_root / relative_path).exists(), msg=relative_path)
 
+    def test_workflows_do_not_contain_empty_env_blocks(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        for workflow_path in sorted((repo_root / ".github" / "workflows").glob("*.yml")):
+            lines = workflow_path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if line.strip() != "env:":
+                    continue
+                env_indent = len(line) - len(line.lstrip(" "))
+                for next_line in lines[index + 1 :]:
+                    if not next_line.strip():
+                        continue
+                    next_indent = len(next_line) - len(next_line.lstrip(" "))
+                    self.assertGreater(
+                        next_indent,
+                        env_indent,
+                        msg=f"{workflow_path.relative_to(repo_root)} has an empty env block at line {index + 1}",
+                    )
+                    break
+
     def test_z3_and_opensmt_rq2_workflows_drop_legacy_artifact_helpers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
 

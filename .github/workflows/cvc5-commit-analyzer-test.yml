@@ -101,7 +101,6 @@ jobs:
           ls -la coverage_mapping.json
 
       - name: Run Commit Fuzzer
-        env:
         run: |
           python3 scripts/solver_fuzzing_brain.py \
             --contract contracts/solvers/cvc5.yml \
