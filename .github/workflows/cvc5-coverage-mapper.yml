@@ -34,5 +34,4 @@ jobs:
       solver_name: cvc5
       contract_path: contracts/solvers/cvc5.yml
       commit_hash: ${{ inputs.cvc5_commit_hash }}
-      test_count: ${{ inputs.test_count || 0 }}
     secrets: inherit

@@ -25,12 +25,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run:
+  run-manual:
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/solver-commit-fuzzer.yml
     with:
       solver_name: cvc5
       contract_path: contracts/solvers/cvc5.yml
       commit_hash: ${{ inputs.cvc5_commit_hash }}
-      smoke_test_limit: ${{ inputs.smoke_test_limit || 0 }}
-      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes || 5 }}
+      smoke_test_limit: ${{ inputs.smoke_test_limit }}
+      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes }}
+    secrets: inherit
+
+  run-scheduled:
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/solver-commit-fuzzer.yml
+    with:
+      solver_name: cvc5
+      contract_path: contracts/solvers/cvc5.yml
     secrets: inherit

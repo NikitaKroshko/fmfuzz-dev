@@ -25,12 +25,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run:
+  run-manual:
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/solver-commit-fuzzer.yml
     with:
       solver_name: opensmt
       contract_path: contracts/solvers/opensmt.yml
       commit_hash: ${{ inputs.opensmt_commit_hash }}
-      smoke_test_limit: ${{ inputs.smoke_test_limit || 0 }}
-      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes || 5 }}
+      smoke_test_limit: ${{ inputs.smoke_test_limit }}
+      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes }}
+    secrets: inherit
+
+  run-scheduled:
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/solver-commit-fuzzer.yml
+    with:
+      solver_name: opensmt
+      contract_path: contracts/solvers/opensmt.yml
     secrets: inherit

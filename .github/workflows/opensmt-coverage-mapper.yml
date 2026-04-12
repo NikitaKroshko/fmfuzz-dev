@@ -34,5 +34,4 @@ jobs:
       solver_name: opensmt
       contract_path: contracts/solvers/opensmt.yml
       commit_hash: ${{ inputs.opensmt_commit_hash }}
-      test_count: ${{ inputs.test_count || 0 }}
     secrets: inherit
