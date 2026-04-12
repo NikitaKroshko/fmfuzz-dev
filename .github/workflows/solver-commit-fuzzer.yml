@@ -17,12 +17,12 @@ on:
         type: string
       smoke_test_limit:
         required: false
-        type: number
-        default: 0
+        type: string
+        default: "0"
       stop_buffer_minutes:
         required: false
-        type: number
-        default: 5
+        type: string
+        default: "5"
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -54,7 +54,7 @@ jobs:
         run: pip install boto3
 
       - name: Configure AWS credentials
-        if: inputs.smoke_test_limit == 0 && inputs.commit_hash == ''
+        if: inputs.smoke_test_limit == '0' && inputs.commit_hash == ''
         uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}

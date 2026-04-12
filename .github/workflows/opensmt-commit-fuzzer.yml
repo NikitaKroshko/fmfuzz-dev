@@ -10,13 +10,13 @@ on:
       smoke_test_limit:
         description: "Optional: run a local smoke fuzzer with this many tests"
         required: false
-        type: number
-        default: 0
+        type: string
+        default: "0"
       stop_buffer_minutes:
         description: "Minutes before timeout to stop fuzzing"
         required: false
-        type: number
-        default: 5
+        type: string
+        default: "5"
   schedule:
     - cron: "45 0,5,10,15,20 * * *"
 
@@ -31,9 +31,9 @@ jobs:
     with:
       solver_name: opensmt
       contract_path: contracts/solvers/opensmt.yml
-      commit_hash: ${{ inputs.opensmt_commit_hash }}
-      smoke_test_limit: ${{ inputs.smoke_test_limit }}
-      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes }}
+      commit_hash: "${{ inputs.opensmt_commit_hash }}"
+      smoke_test_limit: "${{ inputs.smoke_test_limit }}"
+      stop_buffer_minutes: "${{ inputs.stop_buffer_minutes }}"
     secrets: inherit
 
   run-scheduled:
