@@ -25,13 +25,13 @@ on:
         default: "5"
     secrets:
       AWS_ACCESS_KEY_ID:
-        required: true
+        required: false
       AWS_SECRET_ACCESS_KEY:
-        required: true
+        required: false
       AWS_REGION:
-        required: true
+        required: false
       AWS_S3_BUCKET:
-        required: true
+        required: false
 
 jobs:
   select-target:
@@ -52,6 +52,25 @@ jobs:
 
       - name: Install dependencies
         run: pip install boto3
+
+      - name: Validate AWS configuration for production fuzzing
+        if: inputs.smoke_test_limit == '0'
+        env:
+          AWS_ACCESS_KEY_ID_VALUE: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY_VALUE: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION_VALUE: ${{ secrets.AWS_REGION }}
+          AWS_S3_BUCKET_VALUE: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          missing=()
+          if [ -z "$AWS_ACCESS_KEY_ID_VALUE" ]; then missing+=(AWS_ACCESS_KEY_ID); fi
+          if [ -z "$AWS_SECRET_ACCESS_KEY_VALUE" ]; then missing+=(AWS_SECRET_ACCESS_KEY); fi
+          if [ -z "$AWS_REGION_VALUE" ]; then missing+=(AWS_REGION); fi
+          if [ -z "$AWS_S3_BUCKET_VALUE" ]; then missing+=(AWS_S3_BUCKET); fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Production commit fuzzing requires AWS/S3 secrets: ${missing[*]}"
+            echo "For a local smoke run, trigger the workflow with smoke_test_limit set to a positive integer."
+            exit 1
+          fi
 
       - name: Configure AWS credentials
         if: inputs.smoke_test_limit == '0' && inputs.commit_hash == ''
@@ -112,7 +131,6 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       total_tests: ${{ steps.matrix.outputs.total_tests }}
       target_binary: ${{ steps.paths.outputs.target_binary }}
-      reference_binary: ${{ steps.reference.outputs.reference_binary }}
     steps:
       - name: Record job start time
         run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
@@ -204,16 +222,6 @@ jobs:
           fi
           echo "target_binary=$TARGET_BINARY" >> "$GITHUB_OUTPUT"
 
-      - name: Set up reference binary
-        id: reference
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract "${{ inputs.contract_path }}" \
-            setup-reference \
-            --json > reference.json
-          REFERENCE_BINARY=$(jq -r '.reference_binary // empty' reference.json)
-          echo "reference_binary=$REFERENCE_BINARY" >> "$GITHUB_OUTPUT"
-
       - name: Build smoke matrix
         if: needs.select-target.outputs.smoke == 'true'
         run: |
@@ -272,9 +280,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install harness tooling
+      - name: Install harness tooling and contract dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
           pip install boto3 psutil requests antlr4-python3-runtime==4.9.2 "yinyang==0.3.0"
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
 
       - name: Configure AWS credentials
         if: needs.select-target.outputs.smoke != 'true'
@@ -338,7 +356,11 @@ jobs:
       - name: Run harness
         run: |
           TESTS_JSON=$(jq -c '.tests' <<< '${{ toJson(matrix) }}')
-          TARGET_BINARY="${{ needs.prepare-matrix.outputs.target_binary }}"
+          if [ -f build.json ]; then
+            TARGET_BINARY=$(jq -r '.binary_path' build.json)
+          else
+            TARGET_BINARY="${{ needs.prepare-matrix.outputs.target_binary }}"
+          fi
           REFERENCE_BINARY=$(jq -r '.reference_binary // empty' reference.json)
           mkdir -p logs bugs
           ARGS=()

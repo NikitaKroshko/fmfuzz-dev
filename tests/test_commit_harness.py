@@ -455,6 +455,19 @@ index 1111111..2222222 100644
         self.assertIn("increment", reusable_text)
         self.assertNotIn("LOCAL_TEST_LIMIT", reusable_text)
 
+    def test_commit_fuzzer_manual_smoke_does_not_require_aws_template_secrets(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        reusable_text = (repo_root / ".github" / "workflows" / "solver-commit-fuzzer.yml").read_text(encoding="utf-8")
+        cvc5_text = (repo_root / ".github" / "workflows" / "cvc5-commit-fuzzer.yml").read_text(encoding="utf-8")
+
+        self.assertIn("AWS_ACCESS_KEY_ID:\n        required: false", reusable_text)
+        self.assertIn("AWS_SECRET_ACCESS_KEY:\n        required: false", reusable_text)
+        self.assertIn("AWS_REGION:\n        required: false", reusable_text)
+        self.assertIn("AWS_S3_BUCKET:\n        required: false", reusable_text)
+        self.assertIn("Validate AWS configuration for production fuzzing", reusable_text)
+        self.assertIn('default: "16"', cvc5_text)
+        self.assertIn('smoke_test_limit: "${{ inputs.smoke_test_limit }}"', cvc5_text)
+
     def test_reusable_workflows_are_contract_parameterized(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         reusable_names = [

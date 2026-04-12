@@ -8,10 +8,10 @@ on:
         required: false
         type: string
       smoke_test_limit:
-        description: "Optional: run a local smoke fuzzer with this many tests"
+        description: "Smoke test count for manual runs; set to 0 for S3-backed production fuzzing"
         required: false
         type: string
-        default: "0"
+        default: "16"
       stop_buffer_minutes:
         description: "Minutes before timeout to stop fuzzing"
         required: false
