@@ -200,15 +200,7 @@ jobs:
           if [ -f build.json ]; then
             TARGET_BINARY=$(jq -r '.binary_path' build.json)
           else
-            python3 - <<'PY' > target-binary.txt
-import json
-from pathlib import Path
-contract = json.load(open("contract.json"))
-workspace = Path(contract["workspace_layout"]["solver_workspace"])
-configured = Path(contract["production_binary_path"])
-print(configured if configured.is_absolute() else workspace / configured)
-PY
-            TARGET_BINARY=$(cat target-binary.txt)
+            TARGET_BINARY=$(python3 -c 'import json; from pathlib import Path; c=json.load(open("contract.json")); p=Path(c["production_binary_path"]); w=Path(c["workspace_layout"]["solver_workspace"]); print(p if p.is_absolute() else w / p)')
           fi
           echo "target_binary=$TARGET_BINARY" >> "$GITHUB_OUTPUT"
 
