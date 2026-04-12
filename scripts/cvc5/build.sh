@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE' >&2
-Usage: build.sh [--instrumentation|--coverage] [--static]
+Usage: build.sh [--instrumented|--instrumentation|--coverage] [--static]
 
 Builds the checked-out cvc5 repository from SOLVER_WORKSPACE.
 The final stdout line is always: BINARY_PATH=/abs/path/to/binary
@@ -24,7 +24,7 @@ ENABLE_STATIC="false"
 
 for arg in "$@"; do
   case "$arg" in
-    --instrumentation|--coverage)
+    --instrumented|--instrumentation|--coverage)
       MODE="instrumentation"
       ;;
     --static)

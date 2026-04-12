@@ -13,6 +13,37 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 class ContractError(ValueError):
     """Raised when a solver contract is missing data or is malformed."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        solver_name: Optional[str] = None,
+        step: str = "contract validation",
+        command: Optional[str] = None,
+        hint: Optional[str] = None,
+        issues_url: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.solver_name = solver_name
+        self.step = step
+        self.command = command
+        self.hint = hint
+        self.issues_url = issues_url
+
+    def render(self) -> str:
+        if not self.solver_name and not self.command and not self.hint and not self.issues_url:
+            return self.message
+        solver = self.solver_name or "<unknown>"
+        lines = [f"[solver={solver}][step={self.step}] {self.message}"]
+        if self.command:
+            lines.append(f"command: {self.command}")
+        if self.issues_url:
+            lines.append(f"issue tracker: {self.issues_url}")
+        if self.hint:
+            lines.append(f"hint: {self.hint}")
+        return "\n".join(lines)
+
 
 _INTEGER_RE = re.compile(r"^-?\d+$")
 _FLOAT_RE = re.compile(r"^-?(?:\d+\.\d*|\d*\.\d+)$")
@@ -43,13 +74,20 @@ class SolverContract:
     issues_url: Optional[str]
     tests_repository_url: Optional[str]
     tests_repository_path: Optional[str]
+    build_script: Optional[str]
+    tests_script: Optional[str]
     build_command: str
     coverage_build_command: str
     production_binary_path: str
     coverage_binary_path: str
+    tests_command: Optional[str]
+    seeds_dir: Optional[str]
     test_root: Optional[str]
     test_discovery_command: Optional[str]
     target_commands: Tuple[str, ...]
+    reference_setup_command: Optional[str]
+    reference_binary_path: Optional[str]
+    reference_contract_path: Optional[str]
     oracle_command: Optional[str]
     artifact_paths: Tuple[str, ...]
     artifact_s3_bucket: Optional[str]
@@ -123,32 +161,63 @@ def load_solver_contract(contract_path: str | Path) -> SolverContract:
 def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract:
     solver_name = _required_string(data, "solver_name", contract_path, solver_name=None)
     repository_url = _required_string(data, "repository_url", contract_path, solver_name)
-    repository_path = _required_string(data, "repository_path", contract_path, solver_name)
-    build_command = _required_string(data, "build_command", contract_path, solver_name)
-    coverage_build_command = _required_string(
-        data, "coverage_build_command", contract_path, solver_name
+    repository_path = _optional_string(data.get("repository_path")) or solver_name
+
+    build_script = _optional_string(data.get("build_script"))
+    build_command = (
+        _optional_string(data.get("build_command"))
+        or build_script
+        or _missing_string("build_command", contract_path, solver_name)
     )
-    production_binary_path = _required_string(
-        data, "production_binary_path", contract_path, solver_name
-    )
-    coverage_binary_path = _required_string(
-        data, "coverage_binary_path", contract_path, solver_name
+    coverage_build_command = (
+        _optional_string(data.get("coverage_build_command"))
+        or _optional_string(data.get("instrumented_build_command"))
+        or _optional_string(data.get("instrumentation_build_command"))
+        or (f"{build_script} --instrumented" if build_script else None)
+        or _missing_string("coverage_build_command", contract_path, solver_name)
     )
 
+    binary_path = _optional_string(data.get("binary_path"))
+    production_binary_path = (
+        _optional_string(data.get("production_binary_path"))
+        or binary_path
+        or _missing_string("production_binary_path", contract_path, solver_name)
+    )
+    coverage_binary_path = (
+        _optional_string(data.get("coverage_binary_path"))
+        or _optional_string(data.get("instrumented_binary_path"))
+        or _optional_string(data.get("instrumentation_binary_path"))
+        or binary_path
+        or production_binary_path
+    )
+
+    tests_script = _optional_string(data.get("tests_script"))
+    tests_command = _optional_string(data.get("tests_command")) or tests_script
+    seeds_dir = _optional_string(data.get("seeds_dir"))
+    if tests_command and not seeds_dir:
+        seeds_dir = "FUZZING_SEEDS"
     test_root = _optional_string(data.get("test_root"))
     test_discovery_command = _optional_string(data.get("test_discovery_command"))
-    if not test_root and not test_discovery_command:
+    if not test_root and not test_discovery_command and not tests_command:
         raise ContractError(
             f"missing `test_discovery_command` or `test_root` for solver "
-            f"`{solver_name}` in `{contract_path.name}`"
+            f"`{solver_name}` in `{contract_path.name}`",
+            solver_name=solver_name,
+            hint="provide `tests_script`/`tests_command` for FUZZING_SEEDS, or keep legacy `test_discovery_command`/`test_root`",
+            issues_url=derive_github_issues_url(repository_url),
         )
 
     tests_repository_url = _optional_string(data.get("tests_repository_url"))
     tests_repository_path = _optional_string(data.get("tests_repository_path"))
-    if bool(tests_repository_url) != bool(tests_repository_path):
+    if tests_repository_url and not tests_repository_path:
+        tests_repository_path = f"{solver_name}-tests"
+    if tests_repository_path and not tests_repository_url:
         raise ContractError(
             f"solver `{solver_name}` in `{contract_path.name}` must provide both "
-            "`tests_repository_url` and `tests_repository_path` for split-repo mode"
+            "`tests_repository_url` and `tests_repository_path` for split-repo mode",
+            solver_name=solver_name,
+            hint="remove `tests_repository_path` or add `tests_repository_url`",
+            issues_url=derive_github_issues_url(repository_url),
         )
 
     target_commands = tuple(
@@ -172,6 +241,9 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
     issues_url = _optional_string(data.get("issues_url"))
     artifact_s3_bucket = _optional_string(data.get("artifact_s3_bucket"))
     artifact_s3_prefix = _optional_string(data.get("artifact_s3_prefix"))
+    reference_setup_command = _optional_string(data.get("reference_setup_command"))
+    reference_binary_path = _optional_string(data.get("reference_binary_path"))
+    reference_contract_path = _optional_string(data.get("reference_contract_path"))
     oracle_command = _optional_string(data.get("oracle_command"))
     coverage_target_job_count = _optional_int(data.get("coverage_target_job_count"))
     coverage_average_test_time_seconds = _optional_float(
@@ -187,12 +259,18 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
     if regression_kind and regression_kind not in {"command", "per-test"}:
         raise ContractError(
             f"`regression_kind` for solver `{solver_name}` in `{contract_path.name}` "
-            "must be `command` or `per-test`"
+            "must be `command` or `per-test`",
+            solver_name=solver_name,
+            hint="use `command` for one suite command or `per-test` for one command per discovered seed",
+            issues_url=derive_github_issues_url(repository_url),
         )
     if regression_kind and not regression_command:
         raise ContractError(
             f"`regression_command` is required when `regression_kind` is set for solver "
-            f"`{solver_name}` in `{contract_path.name}`"
+            f"`{solver_name}` in `{contract_path.name}`",
+            solver_name=solver_name,
+            hint="add `regression_command` or remove `regression_kind`",
+            issues_url=derive_github_issues_url(repository_url),
         )
     regression_environment = tuple(
         _string_list(
@@ -210,7 +288,10 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
     if not isinstance(environment_raw, dict):
         raise ContractError(
             f"`environment_requirements` for solver `{solver_name}` in "
-            f"`{contract_path.name}` must be a mapping"
+            f"`{contract_path.name}` must be a mapping",
+            solver_name=solver_name,
+            hint="use `environment_requirements: {packages: [...], env: [...]}`",
+            issues_url=derive_github_issues_url(repository_url),
         )
     environment_requirements = EnvironmentRequirements(
         packages=tuple(
@@ -241,13 +322,20 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
         issues_url=issues_url,
         tests_repository_url=tests_repository_url,
         tests_repository_path=tests_repository_path,
+        build_script=build_script,
+        tests_script=tests_script,
         build_command=build_command,
         coverage_build_command=coverage_build_command,
         production_binary_path=production_binary_path,
         coverage_binary_path=coverage_binary_path,
+        tests_command=tests_command,
+        seeds_dir=seeds_dir,
         test_root=test_root,
         test_discovery_command=test_discovery_command,
         target_commands=target_commands,
+        reference_setup_command=reference_setup_command,
+        reference_binary_path=reference_binary_path,
+        reference_contract_path=reference_contract_path,
         oracle_command=oracle_command,
         artifact_paths=artifact_paths,
         artifact_s3_bucket=artifact_s3_bucket,
@@ -273,11 +361,17 @@ def _required_string(
 ) -> str:
     value = _optional_string(data.get(field_name))
     if value is None:
-        solver_label = solver_name or "<unknown>"
-        raise ContractError(
-            f"missing `{field_name}` for solver `{solver_label}` in `{contract_path.name}`"
-        )
+        return _missing_string(field_name, contract_path, solver_name)
     return value
+
+
+def _missing_string(field_name: str, contract_path: Path, solver_name: Optional[str]) -> str:
+    solver_label = solver_name or "<unknown>"
+    raise ContractError(
+        f"missing `{field_name}` for solver `{solver_label}` in `{contract_path.name}`",
+        solver_name=solver_name,
+        hint=f"add `{field_name}` to the solver contract",
+    )
 
 
 def _optional_string(value: Any) -> Optional[str]:

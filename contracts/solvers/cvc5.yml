@@ -13,6 +13,7 @@ test_discovery_command: scripts/cvc5/test.sh --discover
 target_commands:
   - "{reference_binary}"
   - "{target_binary} --check-models --check-proofs --strings-exp"
+reference_contract_path: contracts/solvers/z3.yml
 oracle_command: null
 coverage_target_job_count: 6
 coverage_average_test_time_seconds: 18.6

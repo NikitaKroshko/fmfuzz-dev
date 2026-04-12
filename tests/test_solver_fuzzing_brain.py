@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import textwrap
 import types
@@ -163,6 +164,212 @@ class SolverFuzzingBrainTests(unittest.TestCase):
                 (solver_root / "invocations.log").read_text(encoding="utf-8").splitlines(),
                 ["", "--instrumentation"],
             )
+
+    def test_user_contract_build_script_tests_script_and_fuzzing_seeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            solver_root = root / "solver"
+            solver_root.mkdir()
+            build_script = root / "build.sh"
+            tests_script = root / "tests.sh"
+            self._write_executable(
+                build_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${SOLVER_WORKSPACE}/bin"
+                case "${1:-}" in
+                  "" ) target="${SOLVER_WORKSPACE}/bin/demo" ;;
+                  --instrumented|--instrumentation|--coverage ) target="${SOLVER_WORKSPACE}/bin/demo-inst" ;;
+                  * ) echo "bad mode: $1" >&2; exit 2 ;;
+                esac
+                printf '#!/bin/sh\\nexit 0\\n' > "$target"
+                chmod +x "$target"
+                printf 'BINARY_PATH=%s\\n' "$target"
+                """,
+            )
+            self._write_executable(
+                tests_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${FUZZING_SEEDS}/nested"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/a.smt2"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/nested/b.smt"
+                printf 'ignore\\n' > "${FUZZING_SEEDS}/ignored.txt"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_script: {build_script}
+                production_binary_path: bin/demo
+                coverage_binary_path: bin/demo-inst
+                tests_script: {tests_script}
+                seeds_dir: FUZZING_SEEDS
+                target_commands:
+                  - "{{target_binary}}"
+                environment_requirements:
+                  packages: []
+                  env: []
+                artifact_paths: []
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            validation = brain.validate_integration()
+            self.assertEqual(validation["status"], "ok")
+
+            production = brain.build(mode="production")
+            instrumentation = brain.build(mode="instrumentation")
+            self.assertEqual(production.binary_path, (solver_root / "bin" / "demo").resolve())
+            self.assertEqual(instrumentation.binary_path, (solver_root / "bin" / "demo-inst").resolve())
+
+            seeds_dir, tests = brain.prepare_seeds()
+            self.assertEqual(seeds_dir, (solver_root / "FUZZING_SEEDS").resolve())
+            self.assertEqual(tests, ["a.smt2", "nested/b.smt"])
+            matrix = brain.build_matrix(max_jobs=1)
+            self.assertEqual(matrix["total_tests"], 2)
+            self.assertEqual(matrix["matrix"]["include"][0]["tests"], ["a.smt2", "nested/b.smt"])
+
+    def test_doctor_can_run_lightweight_script_checks_in_fake_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_script = root / "build.sh"
+            tests_script = root / "tests.sh"
+            self._write_executable(
+                build_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${SOLVER_WORKSPACE}/bin"
+                target="${SOLVER_WORKSPACE}/bin/demo"
+                if [[ "${1:-}" == "--instrumented" ]]; then
+                  target="${SOLVER_WORKSPACE}/bin/demo-inst"
+                fi
+                printf '#!/bin/sh\\nexit 0\\n' > "$target"
+                chmod +x "$target"
+                printf 'BINARY_PATH=%s\\n' "$target"
+                """,
+            )
+            self._write_executable(
+                tests_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "$FUZZING_SEEDS"
+                printf '(check-sat)\\n' > "$FUZZING_SEEDS/seed.smt2"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                build_script: {build_script}
+                binary_path: bin/demo
+                instrumented_binary_path: bin/demo-inst
+                tests_script: {tests_script}
+                target_commands:
+                  - "{{target_binary}}"
+                artifact_paths: []
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            payload = brain.validate_integration(
+                run_script_checks=True,
+                script_check_workspace=root / "fake-workspace",
+            )
+            self.assertEqual(payload["script_checks"]["seeds"]["test_count"], 1)
+
+    def test_checkout_failure_is_structured_brain_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            contract = self._write_contract(
+                root / "solver.yml",
+                """\
+                solver_name: demo
+                repository_url: file:///definitely/missing/demo.git
+                repository_path: solver
+                build_command: /bin/true
+                coverage_build_command: /bin/true --instrumented
+                production_binary_path: bin/demo
+                coverage_binary_path: bin/demo
+                test_root: .
+                target_commands:
+                  - "{target_binary}"
+                artifact_paths: []
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            with self.assertRaises(BrainError) as ctx:
+                brain.checkout_repositories()
+
+            rendered = ctx.exception.render()
+            self.assertIn("[solver=demo][step=solver checkout]", rendered)
+            self.assertIn("git command failed", rendered)
+            self.assertIn("command: git clone file:///definitely/missing/demo.git", rendered)
+            self.assertIn("stderr:", rendered)
+
+    def test_count_tests_accepts_generic_contract(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "solver").mkdir()
+            tests_script = root / "tests.sh"
+            self._write_executable(
+                tests_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "$FUZZING_SEEDS"
+                printf '(check-sat)\\n' > "$FUZZING_SEEDS/one.smt2"
+                printf '(check-sat)\\n' > "$FUZZING_SEEDS/two.smt"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: /bin/true
+                coverage_build_command: /bin/true --instrumented
+                production_binary_path: bin/demo
+                coverage_binary_path: bin/demo
+                tests_script: {tests_script}
+                target_commands:
+                  - "{{target_binary}}"
+                artifact_paths: []
+                """,
+            )
+            output = root / "count.json"
+
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(repo_root / "scripts" / "coverage" / "count_tests.py"),
+                    "--contract",
+                    str(contract),
+                    "--workspace-root",
+                    str(root),
+                    "--output",
+                    str(output),
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["test_count"], 2)
 
     def test_build_fails_when_binary_is_not_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

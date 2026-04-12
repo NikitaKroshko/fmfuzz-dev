@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -48,6 +49,7 @@ class BrainError(RuntimeError):
         command: Optional[str] = None,
         exit_code: Optional[int] = None,
         log_path: Optional[Path] = None,
+        stderr: Optional[str] = None,
         issues_url: Optional[str] = None,
         hint: Optional[str] = None,
         category: Optional[str] = None,
@@ -60,6 +62,7 @@ class BrainError(RuntimeError):
         self.command = command
         self.exit_code = exit_code
         self.log_path = log_path
+        self.stderr = stderr
         self.issues_url = issues_url
         self.hint = hint
         self.category = category
@@ -77,6 +80,13 @@ class BrainError(RuntimeError):
             lines.append(f"issue tracker: {self.issues_url}")
         if self.log_path:
             lines.append(f"log: {self.log_path}")
+        if self.stderr:
+            stderr = self.stderr.strip()
+            if stderr:
+                if len(stderr) > 2000:
+                    stderr = stderr[-2000:]
+                lines.append("stderr:")
+                lines.append(stderr)
         if self.hint:
             lines.append(f"hint: {self.hint}")
         return "\n".join(lines)
@@ -323,6 +333,7 @@ class SolverFuzzingBrain:
                     command=result.command_string,
                     exit_code=result.returncode,
                     log_path=result.log_path,
+                    stderr=result.stderr,
                     issues_url=self.contract.resolved_issues_url,
                     hint=(
                         f"{normalized_mode}_binary_path did not resolve to an executable"
@@ -383,6 +394,80 @@ class SolverFuzzingBrain:
             log_path=log_path,
         )
 
+    def prepare_seeds(self, *, log_path: Optional[str | Path] = None) -> Tuple[Path, List[str]]:
+        """Run the configured tests script and discover SMT seeds from FUZZING_SEEDS."""
+        if not self.contract.tests_command:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="seed preparation",
+                message="contract does not declare a tests script or tests command",
+                issues_url=self.contract.resolved_issues_url,
+                hint=(
+                    f"add `tests_script` or `tests_command` to `{self.contract.contract_path.name}`, "
+                    "or keep using legacy `test_discovery_command`"
+                ),
+                category="bad contract problem",
+            )
+
+        self._ensure_workspace_exists()
+        seeds_root = self.resolve_seeds_dir()
+        optional_log = Path(log_path).resolve() if log_path else None
+        context = self._command_context(mode="production")
+        context["seeds_dir"] = str(seeds_root)
+        result = self._run_command(
+            step="seed preparation",
+            command_template=self.contract.tests_command,
+            context=context,
+            log_path=optional_log,
+            category="bad contract problem",
+            hint="fix `tests_script`/`tests_command` so it creates FUZZING_SEEDS with .smt/.smt2 files",
+            cwd=self.layout.solver_workspace,
+            extra_env={"FUZZING_SEEDS": str(seeds_root)},
+        )
+        if not seeds_root.exists():
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="seed preparation",
+                message=f"tests command did not create FUZZING_SEEDS: {seeds_root}",
+                command=result.command_string,
+                log_path=result.log_path,
+                stderr=result.stderr,
+                issues_url=self.contract.resolved_issues_url,
+                hint="create the directory named by $FUZZING_SEEDS, or configure `seeds_dir`",
+                category="bad contract problem",
+            )
+        if not seeds_root.is_dir():
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="seed preparation",
+                message=f"FUZZING_SEEDS is not a directory: {seeds_root}",
+                command=result.command_string,
+                log_path=result.log_path,
+                stderr=result.stderr,
+                issues_url=self.contract.resolved_issues_url,
+                hint="`tests.sh` must create a directory, stable symlink, or populated folder",
+                category="bad contract problem",
+            )
+
+        tests = self._discover_smt_files(seeds_root)
+        if not tests:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="seed preparation",
+                message=f"FUZZING_SEEDS contains no .smt/.smt2 files: {seeds_root}",
+                command=result.command_string,
+                log_path=result.log_path,
+                stderr=result.stderr,
+                issues_url=self.contract.resolved_issues_url,
+                hint="populate FUZZING_SEEDS with SMT-LIB seeds ending in .smt or .smt2",
+                category="bad contract problem",
+            )
+        return seeds_root, tests
+
     def discover_tests(self, *, log_path: Optional[str | Path] = None) -> List[str]:
         self._ensure_workspace_exists()
         optional_log = Path(log_path).resolve() if log_path else None
@@ -400,6 +485,8 @@ class SolverFuzzingBrain:
                 ),
             )
             tests = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        elif self.contract.tests_command:
+            _, tests = self.prepare_seeds(log_path=optional_log)
         else:
             test_root = self.resolve_test_root()
             if not test_root.exists():
@@ -513,6 +600,7 @@ class SolverFuzzingBrain:
         start_index: int,
         end_index: int,
         output_path: Optional[str | Path] = None,
+        target_binary: Optional[str] = None,
         reference_binary: Optional[str] = None,
         log_path: Optional[str | Path] = None,
     ) -> Path:
@@ -549,11 +637,11 @@ class SolverFuzzingBrain:
 
         context = self._command_context(
             mode="instrumentation",
-            target_binary=str(self.resolve_binary(mode="instrumentation")),
+            target_binary=str(self.resolve_binary(mode="instrumentation", override=target_binary)),
             reference_binary=(
                 self._normalize_external_command(reference_binary, Path.cwd())
                 if reference_binary
-                else "cvc5"
+                else ""
             ),
         )
         context.update(
@@ -594,6 +682,7 @@ class SolverFuzzingBrain:
                 command=result.command_string,
                 exit_code=result.returncode,
                 log_path=result.log_path,
+                stderr=result.stderr,
                 issues_url=self.contract.resolved_issues_url,
                 hint="check mapper stderr and the declared coverage mapper command",
                 category="coverage problem",
@@ -672,6 +761,59 @@ class SolverFuzzingBrain:
             "commit_hash": self.resolve_commit_hash(self.layout.solver_workspace) or "unknown",
             "solver_version": "main",
         }
+
+    def setup_reference(self) -> Optional[Path]:
+        if self.contract.reference_contract_path:
+            reference_contract = self._resolve_path_value(
+                self.contract.reference_contract_path,
+                self.contract.contract_path.parent,
+            )
+            reference_brain = SolverFuzzingBrain(reference_contract, workspace_root=self.layout.workspace_root)
+            reference_brain.checkout_repositories()
+            return reference_brain.build(mode="production").binary_path
+
+        if self.contract.reference_setup_command:
+            result = self._run_command(
+                step="reference setup",
+                command_template=self.contract.reference_setup_command,
+                context=self._command_context(mode="production"),
+                log_path=None,
+                category="environment problem",
+                hint=f"fix `reference_setup_command` in `{self.contract.contract_path.name}`",
+                cwd=self.brain_root,
+            )
+            binary_from_output = self._try_extract_binary_path(result.stdout)
+            if binary_from_output:
+                return binary_from_output
+
+        if self.contract.reference_binary_path:
+            context = self._command_context(mode="production")
+            try:
+                rendered = self.contract.reference_binary_path.format(**context)
+            except KeyError as exc:
+                raise BrainError(
+                    solver_name=self.contract.solver_name,
+                    repository_url=self.contract.repository_url,
+                    step="reference setup",
+                    message=f"missing placeholder `{exc.args[0]}` while rendering reference_binary_path",
+                    issues_url=self.contract.resolved_issues_url,
+                    hint=f"fix `reference_binary_path` in `{self.contract.contract_path.name}`",
+                    category="bad contract problem",
+                ) from exc
+            reference_binary = self._resolve_path_value(rendered, self.layout.workspace_root)
+            if not reference_binary.exists():
+                raise BrainError(
+                    solver_name=self.contract.solver_name,
+                    repository_url=self.contract.repository_url,
+                    step="reference setup",
+                    message=f"reference binary does not exist: {reference_binary}",
+                    issues_url=self.contract.resolved_issues_url,
+                    hint="fix `reference_binary_path` or `reference_setup_command`",
+                    category="environment problem",
+                )
+            return reference_binary
+
+        return None
 
     def run_regression(
         self,
@@ -1027,9 +1169,15 @@ class SolverFuzzingBrain:
         return binary_path.parent
 
     def resolve_test_root(self) -> Path:
+        if self.contract.tests_command and not self.contract.test_discovery_command:
+            return self.resolve_seeds_dir()
         if not self.contract.test_root:
             return self.layout.tests_workspace
         return self._resolve_path_value(self.contract.test_root, self.layout.tests_workspace)
+
+    def resolve_seeds_dir(self) -> Path:
+        configured = self.contract.seeds_dir or "FUZZING_SEEDS"
+        return self._resolve_path_value(configured, self.layout.tests_workspace)
 
     def resolve_regression_working_directory(self) -> Path:
         configured = self.contract.regression_working_directory
@@ -1199,6 +1347,189 @@ class SolverFuzzingBrain:
             warnings=tuple(warnings),
         )
 
+    def validate_integration(
+        self,
+        *,
+        run_script_checks: bool = False,
+        script_check_workspace: Optional[str | Path] = None,
+    ) -> Dict[str, object]:
+        """Validate contract wiring without requiring a real solver build by default."""
+        self._validate_layout()
+        checked_commands = self._validate_static_commands()
+
+        script_checks: Dict[str, object] = {}
+        if run_script_checks:
+            script_checks = self._run_lightweight_script_checks(script_check_workspace)
+
+        return {
+            "solver_name": self.contract.solver_name,
+            "contract_path": str(self.contract.contract_path),
+            "repository_url": self.contract.repository_url,
+            "workspace_layout": {
+                "workspace_root": str(self.layout.workspace_root),
+                "solver_workspace": str(self.layout.solver_workspace),
+                "tests_workspace": str(self.layout.tests_workspace),
+                "seeds_dir": str(self.resolve_seeds_dir()),
+            },
+            "checked_commands": checked_commands,
+            "script_checks": script_checks,
+            "status": "ok",
+        }
+
+    def _validate_layout(self) -> None:
+        if self.layout.solver_workspace == self.layout.workspace_root:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="contract validation",
+                message="repository_path resolves to the workspace root",
+                issues_url=self.contract.resolved_issues_url,
+                hint="set `repository_path` to a child directory such as the solver name",
+                category="bad contract problem",
+            )
+        if self.contract.uses_split_test_repository and self.layout.tests_workspace == self.layout.solver_workspace:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="contract validation",
+                message="tests_repository_path resolves to the solver workspace",
+                issues_url=self.contract.resolved_issues_url,
+                hint="use a distinct tests repository path for split-repo mode",
+                category="bad contract problem",
+            )
+
+    def _validate_static_commands(self) -> List[str]:
+        context = self._command_context(
+            mode="production",
+            target_binary="/tmp/fmfuzz-target",
+            reference_binary="/tmp/fmfuzz-reference",
+        )
+        context.update(
+            {
+                "build_dir": str(self.resolve_build_directory(mode="instrumentation")),
+                "output_path": "/tmp/fmfuzz-coverage.json",
+            }
+        )
+        checks: List[Tuple[str, Optional[str], str]] = [
+            ("build_command", self.contract.build_command, "fix `build_command` or `build_script`"),
+            (
+                "coverage_build_command",
+                self.contract.coverage_build_command,
+                "fix `coverage_build_command` or provide a build script that accepts --instrumented",
+            ),
+            (
+                "tests_command",
+                self.contract.tests_command,
+                "fix `tests_command` or `tests_script`",
+            ),
+            (
+                "test_discovery_command",
+                self.contract.test_discovery_command,
+                "fix `test_discovery_command` or use `tests_script`",
+            ),
+            (
+                "coverage_mapper_command",
+                self.contract.coverage_mapper_command,
+                "fix `coverage_mapper_command`",
+            ),
+            (
+                "commit_prepare_command",
+                self.contract.commit_prepare_command,
+                "fix `commit_prepare_command`",
+            ),
+            (
+                "reference_setup_command",
+                self.contract.reference_setup_command,
+                "fix `reference_setup_command`",
+            ),
+        ]
+        checked: List[str] = []
+        for label, command_template, hint in checks:
+            if not command_template:
+                continue
+            self._validate_command_resolves(label, command_template, context, hint)
+            checked.append(label)
+
+        for index, command_template in enumerate(self.contract.target_commands, start=1):
+            self._parse_command_template(
+                command_template,
+                context,
+                step="contract validation",
+                hint="fix `target_commands` placeholders in the contract",
+            )
+            checked.append(f"target_commands[{index}]")
+        return checked
+
+    def _validate_command_resolves(
+        self,
+        label: str,
+        command_template: str,
+        context: Dict[str, str],
+        hint: str,
+    ) -> None:
+        argv = self._parse_command_template(
+            command_template,
+            context,
+            step="contract validation",
+            hint=hint,
+        )
+        self._validate_executable_token(label, argv[0], hint)
+
+    def _validate_executable_token(self, label: str, executable: str, hint: str) -> None:
+        if os.path.sep in executable or executable.startswith("."):
+            if not Path(executable).exists():
+                raise BrainError(
+                    solver_name=self.contract.solver_name,
+                    repository_url=self.contract.repository_url,
+                    step="contract validation",
+                    message=f"{label} executable does not exist: {executable}",
+                    command=executable,
+                    issues_url=self.contract.resolved_issues_url,
+                    hint=hint,
+                    category="bad contract problem",
+                )
+            return
+        if shutil.which(executable) is None:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step="contract validation",
+                message=f"{label} executable is not on PATH: {executable}",
+                command=executable,
+                issues_url=self.contract.resolved_issues_url,
+                hint=hint,
+                category="environment problem",
+            )
+
+    def _run_lightweight_script_checks(
+        self,
+        script_check_workspace: Optional[str | Path],
+    ) -> Dict[str, object]:
+        if script_check_workspace is None:
+            temp_dir = tempfile.TemporaryDirectory(prefix="fmfuzz-doctor-")
+            self._script_check_temp_dir = temp_dir  # keep alive until method returns
+            workspace_root = Path(temp_dir.name)
+        else:
+            workspace_root = Path(script_check_workspace).resolve()
+            workspace_root.mkdir(parents=True, exist_ok=True)
+
+        check_brain = SolverFuzzingBrain(self.contract.contract_path, workspace_root=workspace_root)
+        check_brain.layout.solver_workspace.mkdir(parents=True, exist_ok=True)
+        check_brain.layout.tests_workspace.mkdir(parents=True, exist_ok=True)
+
+        production = check_brain.build(mode="production")
+        instrumentation = check_brain.build(mode="instrumentation")
+        seeds_payload: Optional[Dict[str, object]] = None
+        if check_brain.contract.tests_command:
+            seeds_dir, tests = check_brain.prepare_seeds()
+            seeds_payload = {"seeds_dir": str(seeds_dir), "test_count": len(tests)}
+
+        return {
+            "production_binary": str(production.binary_path),
+            "instrumentation_binary": str(instrumentation.binary_path),
+            "seeds": seeds_payload,
+        }
+
     def _checkout_repository(
         self,
         *,
@@ -1209,17 +1540,17 @@ class SolverFuzzingBrain:
     ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if (destination / ".git").exists():
-            subprocess.run(
+            self._run_checkout_git(
                 ["git", "fetch", "--all", "--tags"],
                 cwd=destination,
-                check=True,
-                capture_output=True,
-                text=True,
+                repository_url=repository_url,
+                label=label,
+                hint="check network access, repository permissions, and remote configuration",
             )
         elif destination.exists() and any(destination.iterdir()):
             raise BrainError(
                 solver_name=self.contract.solver_name,
-                repository_url=self.contract.repository_url,
+                repository_url=repository_url,
                 step=f"{label} checkout",
                 message=f"destination exists but is not a git checkout: {destination}",
                 issues_url=self.contract.resolved_issues_url,
@@ -1227,21 +1558,53 @@ class SolverFuzzingBrain:
                 category="environment problem",
             )
         else:
-            subprocess.run(
+            self._run_checkout_git(
                 ["git", "clone", repository_url, str(destination)],
-                check=True,
-                capture_output=True,
-                text=True,
+                cwd=destination.parent,
+                repository_url=repository_url,
+                label=label,
+                hint="check repository_url, credentials, and network access",
             )
 
         if commit_hash:
-            subprocess.run(
+            self._run_checkout_git(
                 ["git", "checkout", commit_hash],
                 cwd=destination,
-                check=True,
-                capture_output=True,
-                text=True,
+                repository_url=repository_url,
+                label=label,
+                hint="check that the requested commit exists in the configured repository",
             )
+
+    def _run_checkout_git(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        repository_url: str,
+        label: str,
+        hint: str,
+    ) -> None:
+        result = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return
+        raise BrainError(
+            solver_name=self.contract.solver_name,
+            repository_url=repository_url,
+            step=f"{label} checkout",
+            message="git command failed",
+            command=shlex.join(list(argv)),
+            exit_code=result.returncode,
+            stderr=result.stderr,
+            issues_url=self.contract.resolved_issues_url,
+            hint=hint,
+            category="checkout problem",
+        )
 
     def _ensure_workspace_exists(self) -> None:
         if not self.layout.solver_workspace.exists():
@@ -1292,6 +1655,7 @@ class SolverFuzzingBrain:
                     self.layout.solver_workspace,
                 )
             ),
+            "seeds_dir": str(self.resolve_seeds_dir()),
         }
         if target_binary is not None:
             context["target_binary"] = target_binary
@@ -1303,6 +1667,12 @@ class SolverFuzzingBrain:
 
     def _normalize_mode(self, mode: str) -> str:
         normalized = mode.strip().lower()
+        aliases = {
+            "coverage": "instrumentation",
+            "instrumented": "instrumentation",
+            "instrumented-coverage": "instrumentation",
+        }
+        normalized = aliases.get(normalized, normalized)
         if normalized not in {"production", "instrumentation"}:
             raise BrainError(
                 solver_name=self.contract.solver_name,
@@ -1315,7 +1685,25 @@ class SolverFuzzingBrain:
             )
         return normalized
 
+    def _discover_smt_files(self, root: Path) -> List[str]:
+        return [
+            path.relative_to(root).as_posix()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and path.suffix.lower() in {".smt", ".smt2"}
+        ]
+
     def _resolve_path_value(self, value: str, base: Path) -> Path:
+        prefixes = {
+            "solver:": self.layout.solver_workspace,
+            "tests:": self.layout.tests_workspace,
+            "brain:": self.brain_root,
+            "workspace:": self.layout.workspace_root,
+            "contract:": self.contract.contract_path.parent,
+        }
+        for prefix, prefix_base in prefixes.items():
+            if value.startswith(prefix):
+                relative = value[len(prefix) :].lstrip("/")
+                return (prefix_base / relative).resolve()
         candidate = Path(value)
         if candidate.is_absolute():
             return candidate.resolve()
@@ -1372,6 +1760,16 @@ class SolverFuzzingBrain:
         binary_path = self._resolve_path_value(binary_path_value, self.layout.solver_workspace)
         self._verify_executable(binary_path, configured_path, step=step, log_path=log_path)
         return binary_path
+
+    def _try_extract_binary_path(self, stdout: str) -> Optional[Path]:
+        for line in reversed(stdout.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("BINARY_PATH="):
+                return self._resolve_path_value(
+                    stripped.split("=", 1)[1].strip(),
+                    self.layout.solver_workspace,
+                )
+        return None
 
     def _verify_executable(
         self,
@@ -1473,10 +1871,16 @@ class SolverFuzzingBrain:
         path_candidate = Path(token)
         if path_candidate.is_absolute():
             return str(path_candidate.resolve())
-        if os.path.sep in token or token.startswith("."):
-            brain_candidate = (self.brain_root / path_candidate).resolve()
-            if brain_candidate.exists():
-                return str(brain_candidate)
+        for base in (
+            self.brain_root,
+            self.contract.contract_path.parent,
+            self.layout.solver_workspace,
+            self.layout.tests_workspace,
+            self.layout.workspace_root,
+        ):
+            candidate = (base / path_candidate).resolve()
+            if candidate.exists():
+                return str(candidate)
         return token
 
     def _execute_command(
@@ -1520,6 +1924,7 @@ class SolverFuzzingBrain:
                 "WORKSPACE_ROOT": str(self.layout.workspace_root),
                 "SOLVER_WORKSPACE": str(self.layout.solver_workspace),
                 "TESTS_WORKSPACE": str(self.layout.tests_workspace),
+                "FUZZING_SEEDS": str(self.resolve_seeds_dir()),
                 "PYTHONPATH": self._pythonpath_with_root(os.environ.get("PYTHONPATH")),
             }
         )
@@ -1592,6 +1997,7 @@ class SolverFuzzingBrain:
                 command=result.command_string,
                 exit_code=result.returncode,
                 log_path=result.log_path,
+                stderr=result.stderr,
                 issues_url=self.contract.resolved_issues_url,
                 hint=hint,
                 category=category,
@@ -1710,8 +2116,13 @@ def _build_parser() -> argparse.ArgumentParser:
     describe = subparsers.add_parser("describe", help="Print the resolved contract as JSON")
     describe.add_argument("--json", action="store_true")
 
+    validate = subparsers.add_parser("validate", aliases=["doctor"], help="Validate the solver contract integration")
+    validate.add_argument("--run-script-checks", action="store_true")
+    validate.add_argument("--script-check-workspace", default=None)
+    validate.add_argument("--json", action="store_true")
+
     build = subparsers.add_parser("build", help="Run the configured build and optionally collect artifacts")
-    build.add_argument("--mode", choices=["production", "instrumentation"], required=True)
+    build.add_argument("--mode", choices=["production", "instrumentation", "instrumented", "coverage"], required=True)
     build.add_argument("--build-arg", action="append", default=[])
     build.add_argument("--artifacts-dir", default=None)
     build.add_argument("--artifact-archive", default=None)
@@ -1734,6 +2145,10 @@ def _build_parser() -> argparse.ArgumentParser:
     discover = subparsers.add_parser("discover-tests", help="Run contract-driven test discovery")
     discover.add_argument("--log-path", default=None)
     discover.add_argument("--json", action="store_true")
+
+    seeds = subparsers.add_parser("prepare-seeds", help="Run tests.sh/tests_command and discover FUZZING_SEEDS")
+    seeds.add_argument("--log-path", default=None)
+    seeds.add_argument("--json", action="store_true")
 
     matrix = subparsers.add_parser("matrix", help="Build a commit-fuzzer matrix from contract-driven discovery")
     matrix.add_argument("--limit-tests", type=int, default=None)
@@ -1758,6 +2173,7 @@ def _build_parser() -> argparse.ArgumentParser:
     coverage_shard.add_argument("--start-index", type=int, required=True)
     coverage_shard.add_argument("--end-index", type=int, required=True)
     coverage_shard.add_argument("--output", default=None)
+    coverage_shard.add_argument("--target-binary", default=None)
     coverage_shard.add_argument("--reference-binary", default=None)
     coverage_shard.add_argument("--log-path", default=None)
     coverage_shard.add_argument("--json", action="store_true")
@@ -1777,11 +2193,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     count_tests.add_argument("--json", action="store_true")
 
+    reference = subparsers.add_parser("setup-reference", help="Prepare the contract-declared reference binary")
+    reference.add_argument("--json", action="store_true")
+
     harness = subparsers.add_parser("run-harness", help="Run the shared commit harness from the contract")
     harness.add_argument("--tests-json", required=True)
     harness.add_argument("--tests-root", default=None)
     harness.add_argument("--job-id", default=None)
-    harness.add_argument("--mode", choices=["production", "instrumentation"], default="production")
+    harness.add_argument("--mode", choices=["production", "instrumentation", "instrumented", "coverage"], default="production")
     harness.add_argument("--target-binary", default=None)
     harness.add_argument("--reference-binary", default=None)
     harness.add_argument("--bugs-folder", default="bugs")
@@ -1795,7 +2214,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     oracle = subparsers.add_parser("oracle", help="Run the contract-declared oracle command")
     oracle.add_argument("--test-file", required=True)
-    oracle.add_argument("--mode", choices=["production", "instrumentation"], default="production")
+    oracle.add_argument("--mode", choices=["production", "instrumentation", "instrumented", "coverage"], default="production")
     oracle.add_argument("--target-binary", default=None)
     oracle.add_argument("--reference-binary", default=None)
     oracle.add_argument("--log-path", default=None)
@@ -1827,7 +2246,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     regression = subparsers.add_parser("run-regression", help="Run contract-driven regression execution")
     regression.add_argument("--suite", default=None)
-    regression.add_argument("--mode", choices=["production", "instrumentation"], default="production")
+    regression.add_argument("--mode", choices=["production", "instrumentation", "instrumented", "coverage"], default="production")
     regression.add_argument("--target-binary", default=None)
     regression.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1))
 
@@ -1867,6 +2286,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "artifact_s3_bucket": brain.contract.artifact_s3_bucket,
                 "artifact_s3_prefix": brain.contract.artifact_s3_prefix,
                 "build_command": brain.contract.build_command,
+                "build_script": brain.contract.build_script,
                 "commit_prepare_command": brain.contract.commit_prepare_command,
                 "contract_path": str(brain.contract.contract_path),
                 "coverage_average_test_time_seconds": brain.contract.coverage_average_test_time_seconds,
@@ -1881,6 +2301,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "issues_url": brain.contract.resolved_issues_url,
                 "oracle_command": brain.contract.oracle_command,
                 "production_binary_path": brain.contract.production_binary_path,
+                "reference_binary_path": brain.contract.reference_binary_path,
+                "reference_contract_path": brain.contract.reference_contract_path,
+                "reference_setup_command": brain.contract.reference_setup_command,
                 "regression_command": brain.contract.regression_command,
                 "regression_environment": list(brain.contract.regression_environment),
                 "regression_kind": brain.contract.regression_kind,
@@ -1890,10 +2313,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "repository_url": brain.contract.repository_url,
                 "solver_name": brain.contract.solver_name,
                 "target_commands": list(brain.contract.target_commands),
+                "seeds_dir": brain.contract.seeds_dir,
                 "test_discovery_command": brain.contract.test_discovery_command,
                 "test_root": brain.contract.test_root,
+                "tests_command": brain.contract.tests_command,
                 "tests_repository_path": brain.contract.tests_repository_path,
                 "tests_repository_url": brain.contract.tests_repository_url,
+                "tests_script": brain.contract.tests_script,
                 "workspace_layout": {
                     "solver_workspace": str(brain.layout.solver_workspace),
                     "tests_workspace": str(brain.layout.tests_workspace),
@@ -1901,6 +2327,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 },
             }
             print(json.dumps(payload, indent=2 if args.json else None, sort_keys=args.json))
+            return 0
+
+        if args.command in {"validate", "doctor"}:
+            payload = brain.validate_integration(
+                run_script_checks=args.run_script_checks,
+                script_check_workspace=args.script_check_workspace,
+            )
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(f"✅ {brain.contract.solver_name} contract validation passed")
             return 0
 
         if args.command == "build":
@@ -1959,10 +2396,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(json.dumps(payload))
             return 0
 
+        if args.command == "setup-reference":
+            reference_binary = brain.setup_reference()
+            payload = {
+                "reference_binary": str(reference_binary) if reference_binary else None,
+                "solver_name": brain.contract.solver_name,
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            elif reference_binary:
+                print(reference_binary)
+            return 0
+
         if args.command == "discover-tests":
             tests = brain.discover_tests(log_path=args.log_path)
             if args.json:
                 print(json.dumps(tests, indent=2))
+            else:
+                for test in tests:
+                    print(test)
+            return 0
+
+        if args.command == "prepare-seeds":
+            seeds_dir, tests = brain.prepare_seeds(log_path=args.log_path)
+            payload = {"seeds_dir": str(seeds_dir), "tests": tests, "total_tests": len(tests)}
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
             else:
                 for test in tests:
                     print(test)
@@ -2010,6 +2469,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 start_index=args.start_index,
                 end_index=args.end_index,
                 output_path=args.output,
+                target_binary=args.target_binary,
                 reference_binary=args.reference_binary,
                 log_path=args.log_path,
             )
@@ -2120,7 +2580,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
     except ContractError as exc:
-        print(str(exc), file=sys.stderr)
+        print(exc.render(), file=sys.stderr)
         return 1
     except BrainError as exc:
         print(exc.render(), file=sys.stderr)

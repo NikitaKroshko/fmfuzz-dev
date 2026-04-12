@@ -4,11 +4,11 @@ on:
   workflow_call:
     inputs:
       z3_commit_hash:
-        description: 'Z3 commit hash to build coverage for'
+        description: "Z3 commit hash to build coverage for"
         required: false
         type: string
       test_count:
-        description: 'Pre-counted test count (optional optimization)'
+        description: "Pre-counted test count"
         required: false
         type: number
     secrets:
@@ -20,259 +20,19 @@ on:
         required: true
       AWS_S3_BUCKET:
         required: true
-
   workflow_dispatch:
     inputs:
       z3_commit_hash:
-        description: 'Optional: Z3 commit hash to build coverage mapping for (defaults to HEAD)'
+        description: "Optional: Z3 commit hash to build coverage mapping for"
         required: false
         type: string
 
 jobs:
-  discover-tests:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.generate-matrix.outputs.matrix }}
-      total_tests: ${{ steps.generate-matrix.outputs.total_tests }}
-      total_jobs: ${{ steps.generate-matrix.outputs.total_jobs }}
-      commit_hash: ${{ steps.resolve-commit.outputs.commit_hash }}
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install tooling and contract dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          pip install psutil
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            describe \
-            --json > contract.json
-          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
-          if [ -n "$PACKAGES" ]; then
-            sudo apt-get install -y $PACKAGES
-          fi
-
-      - name: Resolve analyzed Z3 commit
-        id: resolve-commit
-        run: |
-          CHECKOUT_ARGS=()
-          if [ -n "${{ inputs.z3_commit_hash }}" ]; then
-            CHECKOUT_ARGS+=(--commit-hash "${{ inputs.z3_commit_hash }}")
-          fi
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            checkout \
-            "${CHECKOUT_ARGS[@]}" \
-            --json > checkout.json
-          COMMIT_HASH=$(jq -r '.solver_commit_hash' checkout.json)
-          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
-          echo "Checked out commit: $COMMIT_HASH"
-
-      - name: Generate dynamic matrix
-        id: generate-matrix
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            coverage-matrix \
-            --output matrix.json
-          
-          MATRIX=$(jq -c '.matrix' matrix.json)
-          TOTAL_TESTS=$(jq -r '.total_tests' matrix.json)
-          TOTAL_JOBS=$(jq -r '.total_jobs' matrix.json)
-          
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
-          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
-          
-          echo "✅ Generated matrix with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
-          cat matrix.json
-
-  coverage-analysis:
-    needs: discover-tests
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.discover-tests.outputs.matrix) }}
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install tooling and contract dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          pip install psutil
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            describe \
-            --json > contract.json
-          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
-          if [ -n "$PACKAGES" ]; then
-            sudo apt-get install -y $PACKAGES
-          fi
-
-      - name: Checkout resolved Z3 commit
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            checkout \
-            --commit-hash "${{ needs.discover-tests.outputs.commit_hash }}" \
-            --json > checkout.json
-          echo "Checked out commit: $(jq -r '.solver_commit_hash' checkout.json)"
-
-      - name: Install CVC5 oracle
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          pip install requests
-          python3 scripts/download_cvc5.py $HOME/.local/bin
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          cvc5 --version
-      
-      - name: Build Z3 with coverage
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            build \
-            --mode instrumentation \
-            --json > z3-build.json
-      
-      - name: Run coverage analysis (tests ${{ matrix.start_index }}-${{ matrix.end_index }})
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh \
-            python3 \
-            ${{ github.workspace }}/scripts/solver_fuzzing_brain.py \
-            --contract ${{ github.workspace }}/contracts/solvers/z3.yml \
-            run-coverage-shard \
-            --start-index ${{ matrix.start_index }} \
-            --end-index ${{ matrix.end_index }} \
-            --reference-binary cvc5 \
-            --output ${{ github.workspace }}/z3/build/coverage_mapping_${{ matrix.start_index }}_${{ matrix.end_index }}.json
-      
-      - name: Upload coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-${{ matrix.job_name }}
-          path: z3/build/coverage_mapping_${{ matrix.start_index }}_${{ matrix.end_index }}.json
-          retention-days: 1
-
-  # Join all coverage mappings and create final artifact
-  join-mappings:
-    runs-on: ubuntu-latest
-    needs: [discover-tests, coverage-analysis]
-    outputs:
-      commit_hash: ${{ steps.use-commit.outputs.commit_hash }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Use analyzed Z3 commit hash
-        id: use-commit
-        run: |
-          COMMIT_HASH="${{ needs.discover-tests.outputs.commit_hash }}"
-          if [ -z "$COMMIT_HASH" ]; then
-            echo "❌ Missing analyzed commit hash from discover-tests"
-            exit 1
-          fi
-          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
-          echo "Using analyzed Z3 commit hash: $COMMIT_HASH"
-      
-      - name: Download all coverage mappings
-        uses: actions/download-artifact@v4
-        with:
-          path: coverage-mappings
-      
-      - name: Join coverage mappings
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            join-coverage \
-            --mappings-dir coverage-mappings \
-            --output coverage_mapping.json
-
-      - name: Upload final coverage mapping artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping
-          path: coverage_mapping.json.gz
-          retention-days: 1
-      
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v5.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      
-      - name: Upload final coverage mapping to S3
-        run: |
-          COMMIT_HASH="${{ steps.use-commit.outputs.commit_hash }}"
-          S3_KEY="solvers/z3/coverage-mappings/coverage_mapping-${COMMIT_HASH}.json.gz"
-          
-          if [ ! -f "coverage_mapping.json.gz" ]; then
-            echo "❌ Error: coverage_mapping.json.gz not found"
-            exit 1
-          fi
-          
-          # Upload with tag for lifecycle rule
-          aws s3api put-object \
-            --bucket ${{ secrets.AWS_S3_BUCKET }} \
-            --key "$S3_KEY" \
-            --body coverage_mapping.json.gz \
-            --tagging "Type=CoverageMapping"
-          
-          echo "✅ Uploaded coverage mapping to S3"
-          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
-          echo "Commit hash: ${COMMIT_HASH}"
-
-  # Update coverage state after successful build
-  update-state:
-    runs-on: ubuntu-latest
-    needs: [discover-tests, join-mappings]
-    if: success()
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install boto3
-        run: pip install boto3
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v5.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Update coverage state
-        env:
-          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          python3 scripts/coverage/coverage_state.py z3 update \
-            --test-count ${{ needs.discover-tests.outputs.total_tests }} \
-            --commit-hash ${{ needs.join-mappings.outputs.commit_hash }} \
-            --updated-by "${{ github.workflow }}"
-
-          echo "✅ Updated coverage state: ${{ needs.discover-tests.outputs.total_tests }} tests"
+  map:
+    uses: ./.github/workflows/solver-coverage-mapper.yml
+    with:
+      solver_name: z3
+      contract_path: contracts/solvers/z3.yml
+      commit_hash: ${{ inputs.z3_commit_hash }}
+      test_count: ${{ inputs.test_count || 0 }}
+    secrets: inherit

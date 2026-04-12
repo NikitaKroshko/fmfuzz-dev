@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tarfile
+import argparse
 from pathlib import Path
 
 import boto3
@@ -25,6 +26,13 @@ CONTRACTS = {
     "z3": ROOT / "contracts" / "solvers" / "z3.yml",
     "opensmt": ROOT / "contracts" / "solvers" / "opensmt.yml",
 }
+
+
+def _default_contract_for_solver(solver: str) -> Path | None:
+    if solver in CONTRACTS:
+        return CONTRACTS[solver]
+    candidate = ROOT / "contracts" / "solvers" / f"{solver}.yml"
+    return candidate if candidate.exists() else None
 
 
 def _download_selected_commits(solver: str) -> list[str]:
@@ -50,11 +58,19 @@ def _extract_artifact_archive(archive_path: Path, destination: Path) -> None:
 
 
 def main() -> None:
-    solver = sys.argv[1]
-    if solver not in CONTRACTS:
-        raise RuntimeError(f"Unsupported solver: {solver}")
+    parser = argparse.ArgumentParser(description="Generate an RQ2 coverage matrix")
+    parser.add_argument("solver", help="Solver name")
+    parser.add_argument("max_commits", nargs="?", type=int)
+    parser.add_argument("--contract", type=Path, help="Path to the solver contract YAML file")
+    parser.add_argument("--workspace-root", type=Path, default=ROOT)
+    args = parser.parse_args()
 
-    max_commits = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    solver = args.solver
+    contract_path = args.contract or _default_contract_for_solver(solver)
+    if contract_path is None:
+        raise RuntimeError(f"Unsupported solver without --contract: {solver}")
+
+    max_commits = args.max_commits
     selected_commits = _download_selected_commits(solver)
     if not selected_commits:
         raise RuntimeError("No commits selected")
@@ -62,8 +78,8 @@ def main() -> None:
         selected_commits = selected_commits[:max_commits]
         print(f"📝 Limited to {len(selected_commits)} commits", file=sys.stderr)
 
-    contract = load_solver_contract(CONTRACTS[solver])
-    brain = SolverFuzzingBrain(CONTRACTS[solver], workspace_root=ROOT)
+    contract = load_solver_contract(contract_path)
+    brain = SolverFuzzingBrain(contract_path, workspace_root=args.workspace_root)
 
     first_commit = selected_commits[0]
     print(f"📥 Preparing coverage matrix from {solver} commit {first_commit}", file=sys.stderr)
@@ -75,7 +91,7 @@ def main() -> None:
     client = boto3.client("s3", region_name=os.getenv("AWS_REGION", "eu-north-1"))
     coverage_key = f"evaluation/rq2/{solver}/builds/coverage/{first_commit}.tar.gz"
 
-    artifacts_dir = ROOT / "artifacts"
+    artifacts_dir = args.workspace_root / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifacts_dir / "artifacts.tar.gz"
     client.download_file(bucket, coverage_key, str(artifact_path))

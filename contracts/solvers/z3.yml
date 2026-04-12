@@ -13,6 +13,8 @@ test_discovery_command: scripts/z3/test.sh --discover
 target_commands:
   - "{target_binary} smt.threads=1 memory_max_size=2048 model_validate=true"
   - "{reference_binary} --check-models --check-proofs --strings-exp"
+reference_setup_command: python3 scripts/download_cvc5.py {workspace_root}/reference-bin
+reference_binary_path: "{workspace_root}/reference-bin/cvc5"
 oracle_command: python3 scripts/oracle.py --cvc5-path {reference_binary} --solver-path {target_binary} --solver-flags model_validate=true {test_file}
 coverage_target_job_count: 4
 coverage_average_test_time_seconds: 9.5

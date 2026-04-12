@@ -355,14 +355,15 @@ index 1111111..2222222 100644
     def test_cvc5_coverage_mapper_publishes_final_artifact(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mapper_text = (repo_root / ".github" / "workflows" / "cvc5-coverage-mapper.yml").read_text(encoding="utf-8")
+        reusable_text = (repo_root / ".github" / "workflows" / "solver-coverage-mapper.yml").read_text(encoding="utf-8")
         analyzer_text = (repo_root / ".github" / "workflows" / "cvc5-commit-analyzer-test.yml").read_text(encoding="utf-8")
 
-        join_block = mapper_text.split("  join-mappings:", 1)[1].split("  update-state:", 1)[0]
+        join_block = reusable_text.split("  join-mappings:", 1)[1].split("  update-state:", 1)[0]
         self.assertIn("uses: actions/upload-artifact@v4", join_block)
         self.assertIn("name: coverage-mapping", join_block)
         self.assertIn("path: coverage_mapping.json.gz", join_block)
         self.assertIn("contracts/solvers/cvc5.yml", mapper_text)
-        self.assertIn("scripts/solver_fuzzing_brain.py", mapper_text)
+        self.assertIn("scripts/solver_fuzzing_brain.py", reusable_text)
         self.assertIn("name: coverage-mapping", analyzer_text)
         self.assertIn("gunzip coverage_mapping.json.gz", analyzer_text)
         self.assertIn("contracts/solvers/cvc5.yml", analyzer_text)
@@ -371,11 +372,13 @@ index 1111111..2222222 100644
     def test_opensmt_coverage_mapper_publishes_final_artifact(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         workflow_text = (repo_root / ".github" / "workflows" / "opensmt-coverage-mapper.yml").read_text(encoding="utf-8")
+        reusable_text = (repo_root / ".github" / "workflows" / "solver-coverage-mapper.yml").read_text(encoding="utf-8")
 
-        join_block = workflow_text.split("  join-mappings:", 1)[1].split("  update-state:", 1)[0]
+        join_block = reusable_text.split("  join-mappings:", 1)[1].split("  update-state:", 1)[0]
         self.assertIn("uses: actions/upload-artifact@v4", join_block)
         self.assertIn("name: coverage-mapping", join_block)
         self.assertIn("path: coverage_mapping.json.gz", join_block)
+        self.assertIn("contracts/solvers/opensmt.yml", workflow_text)
 
     def test_build_workflows_delegate_to_shared_contract_driven_build_workflow(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -393,19 +396,12 @@ index 1111111..2222222 100644
 
     def test_coverage_mapper_workflows_propagate_resolved_commit_hash(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
+        workflow_text = (repo_root / ".github" / "workflows" / "solver-coverage-mapper.yml").read_text(encoding="utf-8")
 
-        workflow_expectations = {
-            "z3-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
-            "cvc5-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
-            "opensmt-coverage-mapper.yml": '--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"',
-        }
-
-        for workflow_name, replay_step in workflow_expectations.items():
-            workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
-            self.assertIn("commit_hash: ${{ steps.resolve-commit.outputs.commit_hash }}", workflow_text)
-            self.assertIn(replay_step, workflow_text)
-            self.assertIn('COMMIT_HASH="${{ needs.discover-tests.outputs.commit_hash }}"', workflow_text)
-            self.assertNotIn("steps.get-commit.outputs.commit_hash", workflow_text)
+        self.assertIn("commit_hash: ${{ steps.resolve-commit.outputs.commit_hash }}", workflow_text)
+        self.assertIn('--commit-hash "${{ needs.discover-tests.outputs.commit_hash }}"', workflow_text)
+        self.assertIn('COMMIT_HASH="${{ needs.discover-tests.outputs.commit_hash }}"', workflow_text)
+        self.assertNotIn("steps.get-commit.outputs.commit_hash", workflow_text)
 
     def test_cvc5_workflows_use_contract_brain_and_drop_legacy_helpers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -421,7 +417,16 @@ index 1111111..2222222 100644
         for workflow_name in workflow_names:
             workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
             self.assertIn("contracts/solvers/cvc5.yml", workflow_text)
-            self.assertIn("scripts/solver_fuzzing_brain.py", workflow_text)
+
+        for reusable_name in [
+            "solver-build.yml",
+            "solver-coverage-mapper.yml",
+            "solver-coverage-daily-check.yml",
+            "solver-commit-fuzzer.yml",
+            "solver-manager.yml",
+        ]:
+            reusable_text = (repo_root / ".github" / "workflows" / reusable_name).read_text(encoding="utf-8")
+            self.assertIn("scripts/solver_fuzzing_brain.py", reusable_text)
 
         rq2_build_text = (repo_root / ".github" / "workflows" / "cvc5-evaluation-rq2-build.yml").read_text(encoding="utf-8")
         rq2_coverage_text = (repo_root / ".github" / "workflows" / "cvc5-evaluation-rq2-coverage-mapping.yml").read_text(encoding="utf-8")
@@ -432,17 +437,43 @@ index 1111111..2222222 100644
 
     def test_commit_fuzzer_workflows_use_shared_harness(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
+        reusable_text = (repo_root / ".github" / "workflows" / "solver-commit-fuzzer.yml").read_text(encoding="utf-8")
 
         for solver in ("cvc5", "z3", "opensmt"):
             commit_fuzzer_text = (
                 repo_root / ".github" / "workflows" / f"{solver}-commit-fuzzer.yml"
             ).read_text(encoding="utf-8")
-            self.assertIn("scripts/solver_fuzzing_brain.py", commit_fuzzer_text)
             self.assertIn(f"contracts/solvers/{solver}.yml", commit_fuzzer_text)
-            self.assertIn("run-harness", commit_fuzzer_text)
             self.assertNotIn("simple_commit_fuzzer.py", commit_fuzzer_text)
             self.assertNotIn("run_commit_fuzzer.py", commit_fuzzer_text)
             self.assertNotIn(f"scripts/{solver}/commit_fuzzer", commit_fuzzer_text)
+
+        self.assertIn("scripts/scheduling/fuzzer.py", reusable_text)
+        self.assertIn("prepare-commit", reusable_text)
+        self.assertIn("run-harness", reusable_text)
+        self.assertIn("coverage_mapping.json.gz", reusable_text)
+        self.assertIn("increment", reusable_text)
+        self.assertNotIn("LOCAL_TEST_LIMIT", reusable_text)
+
+    def test_reusable_workflows_are_contract_parameterized(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        reusable_names = [
+            "solver-manager.yml",
+            "solver-coverage-daily-check.yml",
+            "solver-coverage-mapper.yml",
+            "solver-commit-fuzzer.yml",
+        ]
+        forbidden_urls = [
+            "https://github.com/cvc5/cvc5.git",
+            "https://github.com/Z3Prover/z3.git",
+            "https://github.com/usi-verification-and-security/OpenSMT.git",
+        ]
+        for workflow_name in reusable_names:
+            workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertIn("contract_path", workflow_text)
+            self.assertIn("solver_name", workflow_text)
+            for url in forbidden_urls:
+                self.assertNotIn(url, workflow_text, msg=workflow_name)
 
     def test_opensmt_regression_workflow_uses_contract_brain(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -531,14 +562,16 @@ index 1111111..2222222 100644
 
     def test_daily_coverage_checks_include_commit_hash_in_rebuild_decision(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-
+        reusable_text = (repo_root / ".github" / "workflows" / "solver-coverage-daily-check.yml").read_text(encoding="utf-8")
+        self.assertIn("--commit-hash ${{ steps.count-tests.outputs.commit_hash }}", reusable_text)
         for workflow_name in [
             "z3-coverage-daily-check.yml",
             "cvc5-coverage-daily-check.yml",
             "opensmt-coverage-daily-check.yml",
         ]:
             workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
-            self.assertIn("--commit-hash ${{ steps.count-tests.outputs.commit_hash }}", workflow_text)
+            self.assertIn("uses: ./.github/workflows/solver-coverage-daily-check.yml", workflow_text)
+            self.assertIn("schedule:", workflow_text)
 
     def test_discover_opensmt_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

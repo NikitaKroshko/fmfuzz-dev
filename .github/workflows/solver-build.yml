@@ -131,6 +131,13 @@ jobs:
             --commit-hash "${{ needs.check-build-queue.outputs.sha }}" \
             --json > checkout.json
 
+      - name: Validate contract after checkout
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            validate \
+            --json > contract-validation.json
+
       - name: Build solver artifact bundle
         run: |
           mkdir -p "artifacts/${{ matrix.mode }}/bundle"

@@ -1,17 +1,19 @@
 name: CVC5 Commit Fuzzer
 
-env:
-  LOCAL_TEST_LIMIT: 16
-
 on:
   workflow_dispatch:
     inputs:
       cvc5_commit_hash:
-        description: "Optional: CVC5 commit hash to fuzz (defaults to upstream HEAD)"
+        description: "Optional: CVC5 commit hash to fuzz"
         required: false
         type: string
+      smoke_test_limit:
+        description: "Optional: run a local smoke fuzzer with this many tests"
+        required: false
+        type: number
+        default: 0
       stop_buffer_minutes:
-        description: "Optional: Minutes before timeout to stop fuzzing (default: 5)"
+        description: "Minutes before timeout to stop fuzzing"
         required: false
         type: number
         default: 5
@@ -23,132 +25,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-fuzzer:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-
-    steps:
-      - name: Record job start time
-        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
-
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install base tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          pip install psutil requests antlr4-python3-runtime==4.9.2 "yinyang==0.3.0"
-
-      - name: Install contract system dependencies
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/cvc5.yml \
-            describe \
-            --json > contract.json
-          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
-          if [ -n "$PACKAGES" ]; then
-            sudo apt-get install -y $PACKAGES
-          fi
-
-      - name: Checkout CVC5 workspace
-        run: |
-          CHECKOUT_ARGS=()
-          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
-            CHECKOUT_ARGS+=(--commit-hash "${{ inputs.cvc5_commit_hash }}")
-          fi
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/cvc5.yml \
-            checkout \
-            "${CHECKOUT_ARGS[@]}" \
-            --json > cvc5-checkout.json
-
-      - name: Checkout and build Z3 reference binary
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            checkout \
-            --json > z3-checkout.json
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/z3.yml \
-            build \
-            --mode production \
-            --json > z3-build.json
-
-      - name: Build CVC5 target binary
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/cvc5.yml \
-            build \
-            --mode production \
-            --json > cvc5-build.json
-
-      - name: Generate local test set
-        run: |
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/cvc5.yml \
-            matrix \
-            --limit-tests "${LOCAL_TEST_LIMIT}" \
-            --max-jobs 1 \
-            --output matrix.json
-
-      - name: Run local commit fuzzer
-        run: |
-          TEST_COUNT=$(jq -r '.total_tests' matrix.json)
-          if [ "$TEST_COUNT" = "0" ]; then
-            echo "No tests discovered"
-            exit 0
-          fi
-
-          TESTS_JSON=$(jq -c '.matrix.include[0].tests' matrix.json)
-          TARGET_BINARY=$(jq -r '.binary_path' cvc5-build.json)
-          REFERENCE_BINARY=$(jq -r '.binary_path' z3-build.json)
-          STOP_BUFFER="${{ inputs.stop_buffer_minutes || 5 }}"
-
-          mkdir -p logs bugs
-          set -o pipefail
-          python3 scripts/solver_fuzzing_brain.py \
-            --contract contracts/solvers/cvc5.yml \
-            run-harness \
-            --tests-json "$TESTS_JSON" \
-            --job-id "cvc5-local" \
-            --job-start-time "$JOB_START" \
-            --stop-buffer-minutes "$STOP_BUFFER" \
-            --iterations 250 \
-            --target-binary "$TARGET_BINARY" \
-            --reference-binary "$REFERENCE_BINARY" \
-            --bugs-folder bugs \
-            |& tee logs/cvc5-fuzzer.log
-
-      - name: Upload local matrix
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-local-matrix
-          path: matrix.json
-          retention-days: 1
-
-      - name: Upload fuzzer log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-fuzzer-log
-          path: logs/cvc5-fuzzer.log
-          retention-days: 1
-          if-no-files-found: ignore
-
-      - name: Upload bugs artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-bugs
-          path: bugs
-          retention-days: 1
-          if-no-files-found: ignore
+  run:
+    uses: ./.github/workflows/solver-commit-fuzzer.yml
+    with:
+      solver_name: cvc5
+      contract_path: contracts/solvers/cvc5.yml
+      commit_hash: ${{ inputs.cvc5_commit_hash }}
+      smoke_test_limit: ${{ inputs.smoke_test_limit || 0 }}
+      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes || 5 }}
+    secrets: inherit
