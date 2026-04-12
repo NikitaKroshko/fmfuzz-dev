@@ -21,10 +21,14 @@ fi
 
 PYTHONPATH="${BRAIN_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
 python3 - "$TESTS_ROOT" <<'PY'
+import contextlib
 import sys
 
 from scripts.local_commit_fuzzer_matrix import discover_z3_tests
 
-for test_name in discover_z3_tests(sys.argv[1]):
+with contextlib.redirect_stdout(sys.stderr):
+    tests = discover_z3_tests(sys.argv[1])
+
+for test_name in tests:
     print(test_name)
 PY

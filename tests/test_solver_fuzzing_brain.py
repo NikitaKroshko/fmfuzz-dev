@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import textwrap
@@ -495,6 +496,65 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             brain = SolverFuzzingBrain(contract, workspace_root=root)
             self.assertEqual(brain.discover_tests(), ["a.smt2", "b/c.smt"])
 
+    def test_builtin_discovery_scripts_do_not_emit_status_lines_as_tests(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cvc5_build = root / "cvc5" / "build"
+            cvc5_build.mkdir(parents=True)
+            fake_bin = root / "bin"
+            fake_ctest = fake_bin / "ctest"
+            fake_pythonpath = root / "pythonpath"
+            self._write_file(fake_pythonpath / "psutil.py", "")
+            self._write_executable(
+                fake_ctest,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                if [[ "${1:-}" == "--show-only" ]]; then
+                  printf 'Test #1: regress0/a.smt2\\n'
+                  printf 'Test #2: regress0/b.smt2\\n'
+                  exit 0
+                fi
+                exit 2
+                """,
+            )
+
+            cvc5_brain = SolverFuzzingBrain(
+                repo_root / "contracts" / "solvers" / "cvc5.yml",
+                workspace_root=root,
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PYTHONPATH": f"{fake_pythonpath}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+                },
+                clear=False,
+            ):
+                cvc5_tests = cvc5_brain.discover_tests()
+
+            self.assertEqual(cvc5_tests, ["regress0/a.smt2", "regress0/b.smt2"])
+
+            (root / "z3").mkdir()
+            z3_tests_root = root / "z3test" / "regressions" / "smt2"
+            z3_tests_root.mkdir(parents=True)
+            (z3_tests_root / "a.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            (z3_tests_root / "b.smt").write_text("(check-sat)\n", encoding="utf-8")
+
+            z3_brain = SolverFuzzingBrain(
+                repo_root / "contracts" / "solvers" / "z3.yml",
+                workspace_root=root,
+            )
+            with patch.dict(
+                os.environ,
+                {"PYTHONPATH": f"{fake_pythonpath}{os.pathsep}{os.environ.get('PYTHONPATH', '')}"},
+                clear=False,
+            ):
+                z3_tests = z3_brain.discover_tests()
+
+            self.assertEqual(z3_tests, ["regressions/smt2/a.smt2", "regressions/smt2/b.smt"])
+
     def test_oracle_command_templates_reference_target_and_test_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -697,6 +757,18 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             contract = load_solver_contract(repo_root / "contracts" / "solvers" / contract_name)
             self.assertTrue(contract.target_commands)
             self.assertTrue(contract.build_command.endswith("build.sh"))
+
+    def test_reference_contract_path_defaults_to_repo_root(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = SolverFuzzingBrain(
+                repo_root / "contracts" / "solvers" / "cvc5.yml",
+                workspace_root=Path(tmp),
+            )
+
+            resolved = brain._resolve_reference_contract_path(step="contract validation")
+
+            self.assertEqual(resolved, repo_root / "contracts" / "solvers" / "z3.yml")
 
     def test_issue_url_override_beats_derivation(self) -> None:
         self.assertEqual(

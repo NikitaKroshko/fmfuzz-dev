@@ -46,6 +46,8 @@ Compatibility fields still load:
 
 If `build_script` is present and `coverage_build_command` is omitted, the brain runs `build_script --instrumented` for coverage builds.
 
+Reference solver fields are optional. Use `reference_setup_command` plus `reference_binary_path` when the reference can be downloaded or prepared directly. Use `reference_contract_path` when the reference is another solver contract; unprefixed paths are resolved from the fmfuzz repository root, so `contracts/solvers/z3.yml` works from any solver contract. Use `contract:z3.yml` only for a path relative to the current contract file.
+
 ### Script Contracts
 `build.sh`:
 

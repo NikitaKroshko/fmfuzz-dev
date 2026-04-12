@@ -471,6 +471,7 @@ class SolverFuzzingBrain:
     def discover_tests(self, *, log_path: Optional[str | Path] = None) -> List[str]:
         self._ensure_workspace_exists()
         optional_log = Path(log_path).resolve() if log_path else None
+        discovery_stderr: Optional[str] = None
 
         if self.contract.test_discovery_command:
             result = self._run_command(
@@ -484,6 +485,7 @@ class SolverFuzzingBrain:
                     "discovery is enough"
                 ),
             )
+            discovery_stderr = result.stderr
             tests = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         elif self.contract.tests_command:
             _, tests = self.prepare_seeds(log_path=optional_log)
@@ -512,6 +514,7 @@ class SolverFuzzingBrain:
                 step="test discovery",
                 message="test discovery produced zero tests",
                 log_path=optional_log,
+                stderr=discovery_stderr,
                 issues_url=self.contract.resolved_issues_url,
                 hint="fix `test_discovery_command` or `test_root` so at least one test is discovered",
                 category="bad contract problem",
@@ -764,10 +767,7 @@ class SolverFuzzingBrain:
 
     def setup_reference(self) -> Optional[Path]:
         if self.contract.reference_contract_path:
-            reference_contract = self._resolve_path_value(
-                self.contract.reference_contract_path,
-                self.contract.contract_path.parent,
-            )
+            reference_contract = self._resolve_reference_contract_path(step="reference setup")
             reference_brain = SolverFuzzingBrain(reference_contract, workspace_root=self.layout.workspace_root)
             reference_brain.checkout_repositories()
             return reference_brain.build(mode="production").binary_path
@@ -1458,6 +1458,9 @@ class SolverFuzzingBrain:
                 hint="fix `target_commands` placeholders in the contract",
             )
             checked.append(f"target_commands[{index}]")
+        if self.contract.reference_contract_path:
+            self._resolve_reference_contract_path(step="contract validation")
+            checked.append("reference_contract_path")
         return checked
 
     def _validate_command_resolves(
@@ -1708,6 +1711,73 @@ class SolverFuzzingBrain:
         if candidate.is_absolute():
             return candidate.resolve()
         return (base / candidate).resolve()
+
+    def _resolve_contract_path_value(self, value: str) -> Path:
+        prefixes = ("solver:", "tests:", "brain:", "workspace:", "contract:")
+        if value.startswith(prefixes):
+            return self._resolve_path_value(value, self.brain_root)
+
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return candidate.resolve()
+
+        candidates = [
+            (self.brain_root / candidate).resolve(),
+            (self.layout.workspace_root / candidate).resolve(),
+            (self.contract.contract_path.parent / candidate).resolve(),
+        ]
+        seen: set[Path] = set()
+        unique_candidates: List[Path] = []
+        for path in candidates:
+            if path not in seen:
+                seen.add(path)
+                unique_candidates.append(path)
+
+        for path in unique_candidates:
+            if path.exists():
+                return path
+
+        if candidate.parent == Path("."):
+            return (self.contract.contract_path.parent / candidate).resolve()
+        return (self.brain_root / candidate).resolve()
+
+    def _resolve_reference_contract_path(self, *, step: str) -> Path:
+        value = self.contract.reference_contract_path
+        if not value:
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step=step,
+                message="reference_contract_path is not configured",
+                issues_url=self.contract.resolved_issues_url,
+                hint="add `reference_contract_path` or use `reference_setup_command`",
+                category="bad contract problem",
+            )
+        reference_contract = self._resolve_contract_path_value(value)
+        if not reference_contract.exists():
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step=step,
+                message=f"reference contract file does not exist: {reference_contract}",
+                issues_url=self.contract.resolved_issues_url,
+                hint=(
+                    "`reference_contract_path` is repo-root relative by default; use "
+                    "`contract:path.yml` for a path relative to the current contract file"
+                ),
+                category="bad contract problem",
+            )
+        if not reference_contract.is_file():
+            raise BrainError(
+                solver_name=self.contract.solver_name,
+                repository_url=self.contract.repository_url,
+                step=step,
+                message=f"reference contract path is not a file: {reference_contract}",
+                issues_url=self.contract.resolved_issues_url,
+                hint="point `reference_contract_path` at a YAML contract file",
+                category="bad contract problem",
+            )
+        return reference_contract
 
     def _normalize_external_command(self, value: str, base: Path) -> str:
         token = value.strip()

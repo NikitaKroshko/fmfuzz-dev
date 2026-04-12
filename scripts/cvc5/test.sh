@@ -22,10 +22,14 @@ fi
 
 PYTHONPATH="${BRAIN_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
 python3 - "$BUILD_DIR" <<'PY'
+import contextlib
 import sys
 
 from scripts.local_commit_fuzzer_matrix import discover_cvc5_tests
 
-for test_name in discover_cvc5_tests(sys.argv[1]):
+with contextlib.redirect_stdout(sys.stderr):
+    tests = discover_cvc5_tests(sys.argv[1])
+
+for test_name in tests:
     print(test_name)
 PY
