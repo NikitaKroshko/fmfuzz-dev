@@ -1293,6 +1293,9 @@ class SolverFuzzingBrainTests(unittest.TestCase):
                         "(check-sat)\n",
                         encoding="utf-8",
                     ),
+                    (workspace_root / "z3test" / "regressions" / "smt2" / "0xff.smt2").write_bytes(
+                        b"\xff",
+                    ),
                     (workspace_root / "z3test" / "regressions" / "smt2" / "ignored.txt").write_text(
                         "ignore\n",
                         encoding="utf-8",

@@ -55,6 +55,8 @@ for source in sorted(search_root.rglob("*")):
         continue
     try:
         content = source.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
     except Exception as exc:
         raise SystemExit(f"failed to read z3 test source {source}: {exc}") from exc
     if re.search(r"\(check-sat-using\b", content, re.IGNORECASE):
