@@ -30,6 +30,7 @@ from scripts.local_commit_fuzzer_matrix import (  # noqa: E402
 )
 from scripts.solver_contract import (  # noqa: E402
     ContractError,
+    derive_github_issues_url,
     SolverContract,
     WorkspaceLayout,
     load_solver_contract,
@@ -69,15 +70,13 @@ class BrainError(RuntimeError):
 
     def render(self) -> str:
         lines = [f"[solver={self.solver_name}][step={self.step}] {self.message}"]
-        if self.category:
-            lines.append(f"category: {self.category}")
-        if self.command:
-            lines.append(f"command: {self.command}")
+        lines.append(f"category: {self.category or '<unknown>'}")
+        lines.append(f"command: {self.command or '<unknown>'}")
         if self.exit_code is not None:
             lines.append(f"exit code: {self.exit_code}")
-        lines.append(f"repo: {self.repository_url}")
-        if self.issues_url:
-            lines.append(f"issue tracker: {self.issues_url}")
+        lines.append(f"repository url: {self.repository_url}")
+        issue_tracker = self.issues_url or derive_github_issues_url(self.repository_url) or "<unknown>"
+        lines.append(f"issue tracker: {issue_tracker}")
         if self.log_path:
             lines.append(f"log: {self.log_path}")
         if self.stderr:
@@ -87,8 +86,7 @@ class BrainError(RuntimeError):
                     stderr = stderr[-2000:]
                 lines.append("stderr:")
                 lines.append(stderr)
-        if self.hint:
-            lines.append(f"hint: {self.hint}")
+        lines.append(f"hint: {self.hint or '<unknown>'}")
         return "\n".join(lines)
 
 
@@ -453,19 +451,6 @@ class SolverFuzzingBrain:
             )
 
         tests = self._discover_smt_files(seeds_root)
-        if not tests:
-            raise BrainError(
-                solver_name=self.contract.solver_name,
-                repository_url=self.contract.repository_url,
-                step="seed preparation",
-                message=f"FUZZING_SEEDS contains no .smt/.smt2 files: {seeds_root}",
-                command=result.command_string,
-                log_path=result.log_path,
-                stderr=result.stderr,
-                issues_url=self.contract.resolved_issues_url,
-                hint="populate FUZZING_SEEDS with SMT-LIB seeds ending in .smt or .smt2",
-                category="bad contract problem",
-            )
         return seeds_root, tests
 
     def discover_tests(self, *, log_path: Optional[str | Path] = None) -> List[str]:
@@ -473,7 +458,9 @@ class SolverFuzzingBrain:
         optional_log = Path(log_path).resolve() if log_path else None
         discovery_stderr: Optional[str] = None
 
-        if self.contract.test_discovery_command:
+        if self.contract.tests_command:
+            _, tests = self.prepare_seeds(log_path=optional_log)
+        elif self.contract.test_discovery_command:
             result = self._run_command(
                 step="test discovery",
                 command_template=self.contract.test_discovery_command,
@@ -487,8 +474,6 @@ class SolverFuzzingBrain:
             )
             discovery_stderr = result.stderr
             tests = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        elif self.contract.tests_command:
-            _, tests = self.prepare_seeds(log_path=optional_log)
         else:
             test_root = self.resolve_test_root()
             if not test_root.exists():
@@ -1169,7 +1154,7 @@ class SolverFuzzingBrain:
         return binary_path.parent
 
     def resolve_test_root(self) -> Path:
-        if self.contract.tests_command and not self.contract.test_discovery_command:
+        if self.contract.tests_command:
             return self.resolve_seeds_dir()
         if not self.contract.test_root:
             return self.layout.tests_workspace
@@ -1418,16 +1403,6 @@ class SolverFuzzingBrain:
                 "fix `coverage_build_command` or provide a build script that accepts --instrumented",
             ),
             (
-                "tests_command",
-                self.contract.tests_command,
-                "fix `tests_command` or `tests_script`",
-            ),
-            (
-                "test_discovery_command",
-                self.contract.test_discovery_command,
-                "fix `test_discovery_command` or use `tests_script`",
-            ),
-            (
                 "coverage_mapper_command",
                 self.contract.coverage_mapper_command,
                 "fix `coverage_mapper_command`",
@@ -1450,16 +1425,62 @@ class SolverFuzzingBrain:
             self._validate_command_resolves(label, command_template, context, hint)
             checked.append(label)
 
+        if self.contract.tests_command:
+            self._validate_command_resolves(
+                "tests_command",
+                self.contract.tests_command,
+                context,
+                "fix `tests_command` or `tests_script`",
+            )
+            checked.append("tests_command")
+        elif self.contract.test_discovery_command:
+            self._validate_command_resolves(
+                "test_discovery_command",
+                self.contract.test_discovery_command,
+                context,
+                "fix `test_discovery_command` or use `tests_script`",
+            )
+            checked.append("test_discovery_command")
+        else:
+            test_root = self.resolve_test_root()
+            if not test_root.exists():
+                raise BrainError(
+                    solver_name=self.contract.solver_name,
+                    repository_url=self.contract.repository_url,
+                    step="contract validation",
+                    message=f"test root does not exist: {test_root}",
+                    command=str(test_root),
+                    issues_url=self.contract.resolved_issues_url,
+                    hint=f"fix `test_root` in `{self.contract.contract_path.name}`",
+                    category="bad contract problem",
+                )
+            checked.append("test_root")
+
         for index, command_template in enumerate(self.contract.target_commands, start=1):
-            self._parse_command_template(
+            argv = self._parse_command_template(
                 command_template,
                 context,
                 step="contract validation",
                 hint="fix `target_commands` placeholders in the contract",
             )
+            executable = argv[0]
+            placeholder_values = set()
+            for key in ("target_binary", "reference_binary"):
+                value = context.get(key)
+                if not value:
+                    continue
+                placeholder_values.add(value)
+                placeholder_values.add(str(Path(value).resolve()))
+            if executable not in placeholder_values:
+                self._validate_executable_token(
+                    f"target_commands[{index}]",
+                    executable,
+                    "fix `target_commands` placeholders in the contract",
+                )
             checked.append(f"target_commands[{index}]")
         if self.contract.reference_contract_path:
-            self._resolve_reference_contract_path(step="contract validation")
+            reference_contract = self._resolve_reference_contract_path(step="contract validation")
+            load_solver_contract(reference_contract)
             checked.append("reference_contract_path")
         return checked
 
@@ -1749,6 +1770,7 @@ class SolverFuzzingBrain:
                 repository_url=self.contract.repository_url,
                 step=step,
                 message="reference_contract_path is not configured",
+                command="reference_contract_path",
                 issues_url=self.contract.resolved_issues_url,
                 hint="add `reference_contract_path` or use `reference_setup_command`",
                 category="bad contract problem",
@@ -1760,6 +1782,7 @@ class SolverFuzzingBrain:
                 repository_url=self.contract.repository_url,
                 step=step,
                 message=f"reference contract file does not exist: {reference_contract}",
+                command=value,
                 issues_url=self.contract.resolved_issues_url,
                 hint=(
                     "`reference_contract_path` is repo-root relative by default; use "
@@ -1773,6 +1796,7 @@ class SolverFuzzingBrain:
                 repository_url=self.contract.repository_url,
                 step=step,
                 message=f"reference contract path is not a file: {reference_contract}",
+                command=value,
                 issues_url=self.contract.resolved_issues_url,
                 hint="point `reference_contract_path` at a YAML contract file",
                 category="bad contract problem",
@@ -1902,6 +1926,7 @@ class SolverFuzzingBrain:
                 repository_url=self.contract.repository_url,
                 step=step,
                 message=f"missing placeholder `{missing}` while rendering contract command",
+                command=template,
                 issues_url=self.contract.resolved_issues_url,
                 hint=hint,
                 category="bad contract problem",
@@ -1915,6 +1940,7 @@ class SolverFuzzingBrain:
                 repository_url=self.contract.repository_url,
                 step=step,
                 message=f"failed to parse command `{rendered}`: {exc}",
+                command=template,
                 issues_url=self.contract.resolved_issues_url,
                 hint=hint,
                 category="bad contract problem",
@@ -1926,6 +1952,7 @@ class SolverFuzzingBrain:
                 repository_url=self.contract.repository_url,
                 step=step,
                 message="rendered command is empty",
+                command=template,
                 issues_url=self.contract.resolved_issues_url,
                 hint=hint,
                 category="bad contract problem",

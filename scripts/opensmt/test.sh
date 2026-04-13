@@ -4,13 +4,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRAIN_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-TESTS_ROOT="${TESTS_WORKSPACE:-${SOLVER_WORKSPACE:-${BRAIN_ROOT}/opensmt}}"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/opensmt-seeds.XXXXXX")"
 
 usage() {
   cat <<'USAGE' >&2
 Usage: test.sh --discover
 
-Prints newline-separated OpenSMT regression test identifiers.
+Compatibility wrapper that populates a temporary FUZZING_SEEDS directory with
+the canonical tests.sh entrypoint and then prints the discovered seed names.
 USAGE
 }
 
@@ -19,12 +20,27 @@ if [[ "${1:-}" != "--discover" ]]; then
   exit 2
 fi
 
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+FUZZING_SEEDS="$TMP_DIR" \
 PYTHONPATH="${BRAIN_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-python3 - "$TESTS_ROOT" <<'PY'
+"${SCRIPT_DIR}/tests.sh"
+
+PYTHONPATH="${BRAIN_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+python3 - "$TMP_DIR" <<'PY'
 import sys
+from pathlib import Path
 
-from scripts.local_commit_fuzzer_matrix import discover_opensmt_tests
+seed_root = Path(sys.argv[1])
+tests = [
+    path.relative_to(seed_root).as_posix()
+    for path in sorted(seed_root.rglob("*"))
+    if path.is_file() and path.suffix.lower() in {".smt", ".smt2"}
+]
 
-for test_name in discover_opensmt_tests(sys.argv[1]):
+for test_name in tests:
     print(test_name)
 PY

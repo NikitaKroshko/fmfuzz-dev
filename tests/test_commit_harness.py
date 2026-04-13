@@ -453,6 +453,10 @@ index 1111111..2222222 100644
         self.assertIn("run-harness", reusable_text)
         self.assertIn("coverage_mapping.json.gz", reusable_text)
         self.assertIn("increment", reusable_text)
+        self.assertIn("run_mode", reusable_text)
+        self.assertIn("run_mode == 'production'", reusable_text)
+        self.assertIn("run_mode != 'production'", reusable_text)
+        self.assertNotIn("inputs.smoke_test_limit == '0'", reusable_text)
         self.assertNotIn("LOCAL_TEST_LIMIT", reusable_text)
 
     def test_commit_fuzzer_manual_smoke_does_not_require_aws_template_secrets(self) -> None:
@@ -465,8 +469,13 @@ index 1111111..2222222 100644
         self.assertIn("AWS_REGION:\n        required: false", reusable_text)
         self.assertIn("AWS_S3_BUCKET:\n        required: false", reusable_text)
         self.assertIn("Validate AWS configuration for production fuzzing", reusable_text)
+        self.assertIn("run_mode: smoke", (repo_root / ".github" / "workflows" / "cvc5-commit-fuzzer.yml").read_text(encoding="utf-8"))
         self.assertIn('default: "16"', cvc5_text)
         self.assertIn('smoke_test_limit: "${{ inputs.smoke_test_limit }}"', cvc5_text)
+        self.assertIn("default: production", reusable_text)
+        self.assertIn("run_mode == 'production'", reusable_text)
+        self.assertNotIn("smoke_test_limit == '0'", reusable_text)
+        self.assertIn("Production commit fuzzing requires AWS/S3 secrets", reusable_text)
 
     def test_reusable_workflows_are_contract_parameterized(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -487,6 +496,30 @@ index 1111111..2222222 100644
             self.assertIn("solver_name", workflow_text)
             for url in forbidden_urls:
                 self.assertNotIn(url, workflow_text, msg=workflow_name)
+
+    def test_commit_fuzzer_workflow_dispatch_is_explicitly_smoke_mode(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for workflow_name in ["cvc5-commit-fuzzer.yml", "z3-commit-fuzzer.yml", "opensmt-commit-fuzzer.yml"]:
+            workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertIn("run_mode: smoke", workflow_text)
+            self.assertIn("run_mode: production", workflow_text)
+            self.assertIn("smoke_test_limit", workflow_text)
+            self.assertNotIn("inputs.smoke_test_limit == '0'", workflow_text)
+
+    def test_manager_and_daily_workflows_keep_schedules(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        scheduled_workflows = [
+            "cvc5-manager.yml",
+            "z3-manager.yml",
+            "opensmt-manager.yml",
+            "cvc5-coverage-daily-check.yml",
+            "z3-coverage-daily-check.yml",
+            "opensmt-coverage-daily-check.yml",
+        ]
+        for workflow_name in scheduled_workflows:
+            workflow_text = (repo_root / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertIn("schedule:", workflow_text, msg=workflow_name)
+            self.assertIn("cron:", workflow_text, msg=workflow_name)
 
     def test_opensmt_regression_workflow_uses_contract_brain(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

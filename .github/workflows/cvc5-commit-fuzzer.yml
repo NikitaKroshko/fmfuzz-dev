@@ -31,6 +31,7 @@ jobs:
     with:
       solver_name: cvc5
       contract_path: contracts/solvers/cvc5.yml
+      run_mode: smoke
       commit_hash: "${{ inputs.cvc5_commit_hash }}"
       smoke_test_limit: "${{ inputs.smoke_test_limit }}"
       stop_buffer_minutes: "${{ inputs.stop_buffer_minutes }}"
@@ -42,4 +43,5 @@ jobs:
     with:
       solver_name: cvc5
       contract_path: contracts/solvers/cvc5.yml
+      run_mode: production
     secrets: inherit

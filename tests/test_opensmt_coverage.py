@@ -314,8 +314,8 @@ class OpenSMTCoverageTests(unittest.TestCase):
             self.assertEqual(
                 log_file.read_text(encoding="utf-8").splitlines(),
                 [
-                    str((tests_root / "alpha.smt2").resolve()),
-                    str((tests_root / "nested" / "beta.smt").resolve()),
+                    str((opensmt_root / "FUZZING_SEEDS" / "alpha.smt2").resolve()),
+                    str((opensmt_root / "FUZZING_SEEDS" / "nested" / "beta.smt").resolve()),
                 ],
             )
 

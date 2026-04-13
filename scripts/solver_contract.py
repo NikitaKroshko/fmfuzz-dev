@@ -18,6 +18,7 @@ class ContractError(ValueError):
         message: str,
         *,
         solver_name: Optional[str] = None,
+        repository_url: Optional[str] = None,
         step: str = "contract validation",
         command: Optional[str] = None,
         hint: Optional[str] = None,
@@ -26,22 +27,22 @@ class ContractError(ValueError):
         super().__init__(message)
         self.message = message
         self.solver_name = solver_name
+        self.repository_url = repository_url
         self.step = step
         self.command = command
         self.hint = hint
         self.issues_url = issues_url
 
     def render(self) -> str:
-        if not self.solver_name and not self.command and not self.hint and not self.issues_url:
-            return self.message
         solver = self.solver_name or "<unknown>"
+        repository_url = self.repository_url or "<unknown>"
+        command = self.command or "<unknown>"
+        issues_url = self.issues_url or derive_github_issues_url(self.repository_url or "") or "<unknown>"
         lines = [f"[solver={solver}][step={self.step}] {self.message}"]
-        if self.command:
-            lines.append(f"command: {self.command}")
-        if self.issues_url:
-            lines.append(f"issue tracker: {self.issues_url}")
-        if self.hint:
-            lines.append(f"hint: {self.hint}")
+        lines.append(f"command: {command}")
+        lines.append(f"repository url: {repository_url}")
+        lines.append(f"issue tracker: {issues_url}")
+        lines.append(f"hint: {self.hint or '<unknown>'}")
         return "\n".join(lines)
 
 
@@ -167,21 +168,36 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
     build_command = (
         _optional_string(data.get("build_command"))
         or build_script
-        or _missing_string("build_command", contract_path, solver_name)
+        or _missing_string(
+            "build_command",
+            contract_path,
+            solver_name,
+            repository_url=repository_url,
+        )
     )
     coverage_build_command = (
         _optional_string(data.get("coverage_build_command"))
         or _optional_string(data.get("instrumented_build_command"))
         or _optional_string(data.get("instrumentation_build_command"))
         or (f"{build_script} --instrumented" if build_script else None)
-        or _missing_string("coverage_build_command", contract_path, solver_name)
+        or _missing_string(
+            "coverage_build_command",
+            contract_path,
+            solver_name,
+            repository_url=repository_url,
+        )
     )
 
     binary_path = _optional_string(data.get("binary_path"))
     production_binary_path = (
         _optional_string(data.get("production_binary_path"))
         or binary_path
-        or _missing_string("production_binary_path", contract_path, solver_name)
+        or _missing_string(
+            "production_binary_path",
+            contract_path,
+            solver_name,
+            repository_url=repository_url,
+        )
     )
     coverage_binary_path = (
         _optional_string(data.get("coverage_binary_path"))
@@ -203,7 +219,12 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             f"missing `test_discovery_command` or `test_root` for solver "
             f"`{solver_name}` in `{contract_path.name}`",
             solver_name=solver_name,
-            hint="provide `tests_script`/`tests_command` for FUZZING_SEEDS, or keep legacy `test_discovery_command`/`test_root`",
+            repository_url=repository_url,
+            command="tests_script or test_discovery_command",
+            hint=(
+                "provide `tests_script`/`tests_command` for FUZZING_SEEDS, or keep "
+                "legacy `test_discovery_command`/`test_root`"
+            ),
             issues_url=derive_github_issues_url(repository_url),
         )
 
@@ -216,6 +237,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             f"solver `{solver_name}` in `{contract_path.name}` must provide both "
             "`tests_repository_url` and `tests_repository_path` for split-repo mode",
             solver_name=solver_name,
+            repository_url=repository_url,
             hint="remove `tests_repository_path` or add `tests_repository_url`",
             issues_url=derive_github_issues_url(repository_url),
         )
@@ -227,6 +249,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             contract_path,
             solver_name,
             allow_empty=False,
+            repository_url=repository_url,
         )
     )
     artifact_paths = tuple(
@@ -236,6 +259,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             contract_path,
             solver_name,
             allow_empty=True,
+            repository_url=repository_url,
         )
     )
     issues_url = _optional_string(data.get("issues_url"))
@@ -261,6 +285,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             f"`regression_kind` for solver `{solver_name}` in `{contract_path.name}` "
             "must be `command` or `per-test`",
             solver_name=solver_name,
+            repository_url=repository_url,
             hint="use `command` for one suite command or `per-test` for one command per discovered seed",
             issues_url=derive_github_issues_url(repository_url),
         )
@@ -269,6 +294,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             f"`regression_command` is required when `regression_kind` is set for solver "
             f"`{solver_name}` in `{contract_path.name}`",
             solver_name=solver_name,
+            repository_url=repository_url,
             hint="add `regression_command` or remove `regression_kind`",
             issues_url=derive_github_issues_url(repository_url),
         )
@@ -279,6 +305,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             contract_path,
             solver_name,
             allow_empty=True,
+            repository_url=repository_url,
         )
     )
 
@@ -290,6 +317,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             f"`environment_requirements` for solver `{solver_name}` in "
             f"`{contract_path.name}` must be a mapping",
             solver_name=solver_name,
+            repository_url=repository_url,
             hint="use `environment_requirements: {packages: [...], env: [...]}`",
             issues_url=derive_github_issues_url(repository_url),
         )
@@ -301,6 +329,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
                 contract_path,
                 solver_name,
                 allow_empty=True,
+                repository_url=repository_url,
             )
         ),
         env=tuple(
@@ -310,6 +339,7 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
                 contract_path,
                 solver_name,
                 allow_empty=True,
+                repository_url=repository_url,
             )
         ),
     )
@@ -358,18 +388,27 @@ def _required_string(
     field_name: str,
     contract_path: Path,
     solver_name: Optional[str],
+    *,
+    repository_url: Optional[str] = None,
 ) -> str:
     value = _optional_string(data.get(field_name))
     if value is None:
-        return _missing_string(field_name, contract_path, solver_name)
+        return _missing_string(field_name, contract_path, solver_name, repository_url=repository_url)
     return value
 
 
-def _missing_string(field_name: str, contract_path: Path, solver_name: Optional[str]) -> str:
+def _missing_string(
+    field_name: str,
+    contract_path: Path,
+    solver_name: Optional[str],
+    *,
+    repository_url: Optional[str] = None,
+) -> str:
     solver_label = solver_name or "<unknown>"
     raise ContractError(
         f"missing `{field_name}` for solver `{solver_label}` in `{contract_path.name}`",
         solver_name=solver_name,
+        repository_url=repository_url,
         hint=f"add `{field_name}` to the solver contract",
     )
 
@@ -422,35 +461,46 @@ def _string_list(
     solver_name: str,
     *,
     allow_empty: bool,
+    repository_url: Optional[str] = None,
 ) -> List[str]:
     if value is None:
         if allow_empty:
             return []
         raise ContractError(
-            f"missing `{field_name}` for solver `{solver_name}` in `{contract_path.name}`"
+            f"missing `{field_name}` for solver `{solver_name}` in `{contract_path.name}`",
+            solver_name=solver_name,
+            repository_url=repository_url,
         )
     if not isinstance(value, list):
         raise ContractError(
             f"`{field_name}` for solver `{solver_name}` in `{contract_path.name}` "
-            "must be a list of strings"
+            "must be a list of strings",
+            solver_name=solver_name,
+            repository_url=repository_url,
         )
     if not allow_empty and not value:
         raise ContractError(
             f"`{field_name}` for solver `{solver_name}` in `{contract_path.name}` "
-            "must not be empty"
+            "must not be empty",
+            solver_name=solver_name,
+            repository_url=repository_url,
         )
     items: List[str] = []
     for item in value:
         if not isinstance(item, str):
             raise ContractError(
                 f"`{field_name}` for solver `{solver_name}` in `{contract_path.name}` "
-                "must contain only strings"
+                "must contain only strings",
+                solver_name=solver_name,
+                repository_url=repository_url,
             )
         normalized = item.strip()
         if not normalized:
             raise ContractError(
                 f"`{field_name}` for solver `{solver_name}` in `{contract_path.name}` "
-                "must not contain empty strings"
+                "must not contain empty strings",
+                solver_name=solver_name,
+                repository_url=repository_url,
             )
         items.append(normalized)
     return items

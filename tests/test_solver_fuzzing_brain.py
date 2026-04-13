@@ -68,32 +68,58 @@ class SolverFuzzingBrainTests(unittest.TestCase):
 
     def test_contract_loader_fails_with_precise_missing_field_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            contract = self._write_contract(
-                Path(tmp) / "broken.yml",
-                """\
-                solver_name: broken
-                repository_url: https://github.com/example/broken.git
-                repository_path: solver
-                build_command: /bin/true
-                coverage_build_command: /bin/true --instrumentation
-                coverage_binary_path: build/demo-inst
-                test_root: .
-                target_commands:
-                  - "{target_binary}"
-                oracle_command: null
-                artifact_paths: []
-                artifact_s3_bucket: null
-                artifact_s3_prefix: null
-                """,
-            )
+            root = Path(tmp)
+            cases = [
+                (
+                    "production_binary_path",
+                    """\
+                    solver_name: broken
+                    repository_url: https://github.com/example/broken.git
+                    repository_path: solver
+                    build_command: /bin/true
+                    coverage_build_command: /bin/true --instrumentation
+                    coverage_binary_path: build/demo-inst
+                    test_root: .
+                    target_commands:
+                      - "{target_binary}"
+                    oracle_command: null
+                    artifact_paths: []
+                    artifact_s3_bucket: null
+                    artifact_s3_prefix: null
+                    """,
+                    "missing `production_binary_path` for solver `broken` in `broken.yml`",
+                ),
+                (
+                    "target_commands",
+                    """\
+                    solver_name: broken
+                    repository_url: https://github.com/example/broken.git
+                    repository_path: solver
+                    build_command: /bin/true
+                    coverage_build_command: /bin/true --instrumentation
+                    production_binary_path: build/demo
+                    coverage_binary_path: build/demo-inst
+                    test_root: .
+                    oracle_command: null
+                    artifact_paths: []
+                    artifact_s3_bucket: null
+                    artifact_s3_prefix: null
+                    """,
+                    "missing `target_commands` for solver `broken` in `broken.yml`",
+                ),
+            ]
 
-            with self.assertRaises(ContractError) as ctx:
-                load_solver_contract(contract)
+            for field_name, content, expected_message in cases:
+                with self.subTest(field=field_name):
+                    contract = self._write_contract(root / "broken.yml", content)
+                    with self.assertRaises(ContractError) as ctx:
+                        load_solver_contract(contract)
 
-            self.assertEqual(
-                str(ctx.exception),
-                "missing `production_binary_path` for solver `broken` in `broken.yml`",
-            )
+                    self.assertEqual(str(ctx.exception), expected_message)
+                    rendered = ctx.exception.render()
+                    self.assertIn("[solver=broken][step=contract validation]", rendered)
+                    self.assertIn("repository url: https://github.com/example/broken.git", rendered)
+                    self.assertIn("issue tracker: https://github.com/example/broken/issues", rendered)
 
     def test_build_runs_production_and_instrumentation_commands_and_parses_binary_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,6 +191,57 @@ class SolverFuzzingBrainTests(unittest.TestCase):
                 (solver_root / "invocations.log").read_text(encoding="utf-8").splitlines(),
                 ["", "--instrumentation"],
             )
+
+    def test_build_uses_final_binary_path_line_from_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            solver_root = root / "solver"
+            solver_root.mkdir()
+            build_script = root / "build.sh"
+            self._write_executable(
+                build_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${SOLVER_WORKSPACE}/bin"
+                first="${SOLVER_WORKSPACE}/bin/wrong"
+                target="${SOLVER_WORKSPACE}/bin/right"
+                printf '#!/bin/sh\\nexit 0\\n' > "$first"
+                printf '#!/bin/sh\\nexit 0\\n' > "$target"
+                chmod +x "$first" "$target"
+                printf 'BINARY_PATH=%s\\n' "$first"
+                printf 'status: intermediate\\n'
+                printf 'BINARY_PATH=%s\\n' "$target"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: {build_script}
+                coverage_build_command: {build_script} --instrumented
+                production_binary_path: bin/right
+                coverage_binary_path: bin/right
+                test_root: .
+                test_discovery_command: null
+                target_commands:
+                  - "{{target_binary}}"
+                oracle_command: null
+                environment_requirements:
+                  packages: []
+                  env: []
+                artifact_paths: []
+                artifact_s3_bucket: null
+                artifact_s3_prefix: null
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            production = brain.build(mode="production")
+
+            self.assertEqual(production.binary_path, (solver_root / "bin" / "right").resolve())
 
     def test_user_contract_build_script_tests_script_and_fuzzing_seeds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,7 +392,59 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             self.assertIn("[solver=demo][step=solver checkout]", rendered)
             self.assertIn("git command failed", rendered)
             self.assertIn("command: git clone file:///definitely/missing/demo.git", rendered)
+            self.assertIn("repository url: file:///definitely/missing/demo.git", rendered)
+            self.assertIn("issue tracker:", rendered)
             self.assertIn("stderr:", rendered)
+
+    def test_validate_integration_rejects_unresolved_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_script = root / "build.sh"
+            self._write_executable(
+                build_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${SOLVER_WORKSPACE}/bin"
+                target="${SOLVER_WORKSPACE}/bin/demo"
+                printf '#!/bin/sh\\nexit 0\\n' > "$target"
+                chmod +x "$target"
+                printf 'BINARY_PATH=%s\\n' "$target"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_script: {build_script}
+                production_binary_path: bin/demo
+                coverage_binary_path: bin/demo
+                tests_script: tests.sh
+                target_commands:
+                  - "definitely-not-installed-command-12345 --flag"
+                artifact_paths: []
+                """,
+            )
+            self._write_executable(
+                root / "tests.sh",
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "$FUZZING_SEEDS"
+                printf '(check-sat)\\n' > "$FUZZING_SEEDS/seed.smt2"
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            with self.assertRaises(BrainError) as ctx:
+                brain.validate_integration()
+
+            rendered = ctx.exception.render()
+            self.assertIn("definitely-not-installed-command-12345", rendered)
+            self.assertIn("repository url: https://github.com/example/demo.git", rendered)
+            self.assertIn("issue tracker: https://github.com/example/demo/issues", rendered)
 
     def test_count_tests_accepts_generic_contract(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -371,6 +500,57 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["test_count"], 2)
+
+    def test_coverage_matrix_is_built_from_fuzzing_seeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "solver").mkdir()
+            tests_script = root / "tests.sh"
+            self._write_executable(
+                tests_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${FUZZING_SEEDS}/nested"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/alpha.smt2"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/nested/beta.smt"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: /bin/true
+                coverage_build_command: /bin/true --instrumented
+                production_binary_path: bin/demo
+                coverage_binary_path: bin/demo
+                tests_script: {tests_script}
+                target_commands:
+                  - "{{target_binary}}"
+                artifact_paths: []
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            matrix = brain.build_coverage_matrix(
+                max_job_time_minutes=60,
+                buffer_minutes=10,
+                target_jobs=2,
+                avg_test_time_seconds=1.0,
+            )
+
+            self.assertEqual(matrix["total_tests"], 2)
+            self.assertEqual(matrix["total_jobs"], 2)
+            self.assertEqual(matrix["tests_per_job"], 1)
+            self.assertEqual(
+                matrix["matrix"]["include"],
+                [
+                    {"job_name": "demo-coverage-1", "start_index": 1, "end_index": 1},
+                    {"job_name": "demo-coverage-2", "start_index": 2, "end_index": 2},
+                ],
+            )
 
     def test_build_fails_when_binary_is_not_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,6 +641,61 @@ class SolverFuzzingBrainTests(unittest.TestCase):
 
             brain = SolverFuzzingBrain(contract, workspace_root=root)
             self.assertEqual(brain.discover_tests(), ["preferred.smt2"])
+
+    def test_tests_script_takes_precedence_over_legacy_discovery_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            solver_root = root / "solver"
+            tests_root = solver_root / "tests"
+            tests_root.mkdir(parents=True)
+            (tests_root / "fallback.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            discover_script = root / "discover.sh"
+            tests_script = root / "tests.sh"
+            self._write_executable(
+                discover_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf 'preferred.smt2\\n'
+                """,
+            )
+            self._write_executable(
+                tests_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${FUZZING_SEEDS}/nested"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/alpha.smt2"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/nested/beta.smt"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: /bin/true
+                coverage_build_command: /bin/true --instrumented
+                production_binary_path: bin/demo
+                coverage_binary_path: bin/demo-inst
+                tests_script: {tests_script}
+                test_root: tests
+                test_discovery_command: {discover_script}
+                target_commands:
+                  - "{{target_binary}}"
+                oracle_command: null
+                environment_requirements:
+                  packages: []
+                  env: []
+                artifact_paths: []
+                artifact_s3_bucket: null
+                artifact_s3_prefix: null
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            self.assertEqual(brain.discover_tests(), ["alpha.smt2", "nested/beta.smt"])
 
     def test_test_root_discovery_returns_sorted_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -751,12 +986,166 @@ class SolverFuzzingBrainTests(unittest.TestCase):
                 [(str(source_file.resolve()), "bucket", "prefix/path/artifact.tar.gz")],
             )
 
-    def test_builtin_solver_contracts_load(self) -> None:
+    def test_builtin_solver_contracts_expose_script_surface(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        for contract_name in ["cvc5.yml", "z3.yml", "opensmt.yml"]:
-            contract = load_solver_contract(repo_root / "contracts" / "solvers" / contract_name)
-            self.assertTrue(contract.target_commands)
-            self.assertTrue(contract.build_command.endswith("build.sh"))
+
+        cvc5_contract = load_solver_contract(repo_root / "contracts" / "solvers" / "cvc5.yml")
+        self.assertTrue(cvc5_contract.target_commands)
+        self.assertTrue(cvc5_contract.build_command.endswith("build.sh"))
+        self.assertTrue(cvc5_contract.test_discovery_command.endswith("test.sh --discover"))
+
+        z3_contract = load_solver_contract(repo_root / "contracts" / "solvers" / "z3.yml")
+        self.assertTrue(z3_contract.target_commands)
+        self.assertEqual(z3_contract.build_script, "scripts/z3/build.sh")
+        self.assertEqual(z3_contract.tests_script, "scripts/z3/tests.sh")
+        self.assertEqual(z3_contract.seeds_dir, "FUZZING_SEEDS")
+        self.assertEqual(z3_contract.tests_repository_url, "https://github.com/z3prover/z3test.git")
+
+        opensmt_contract = load_solver_contract(repo_root / "contracts" / "solvers" / "opensmt.yml")
+        self.assertTrue(opensmt_contract.target_commands)
+        self.assertEqual(opensmt_contract.build_script, "scripts/opensmt/build.sh")
+        self.assertEqual(opensmt_contract.tests_script, "scripts/opensmt/tests.sh")
+        self.assertEqual(opensmt_contract.seeds_dir, "FUZZING_SEEDS")
+        self.assertIsNone(opensmt_contract.tests_repository_url)
+
+    def test_bad_reference_contract_fails_during_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "solver").mkdir()
+            reference_contract = root / "reference.yml"
+            self._write_contract(
+                reference_contract,
+                """\
+                solver_name: reference
+                repository_url: https://github.com/example/reference.git
+                build_command: python3
+                coverage_build_command: python3
+                production_binary_path: build/reference
+                coverage_binary_path: build/reference
+                test_root: .
+                artifact_paths: []
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                """\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: python3
+                coverage_build_command: python3
+                production_binary_path: build/demo
+                coverage_binary_path: build/demo
+                test_root: .
+                reference_contract_path: contract:reference.yml
+                target_commands:
+                  - "{target_binary}"
+                artifact_paths: []
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            with self.assertRaises(ContractError) as ctx:
+                brain.validate_integration()
+
+            rendered = ctx.exception.render()
+            self.assertIn("missing `target_commands`", rendered)
+            self.assertIn("repository url: https://github.com/example/reference.git", rendered)
+            self.assertIn("issue tracker: https://github.com/example/reference/issues", rendered)
+
+    def test_z3_and_opensmt_validate_and_prepare_seeds_from_tests_script(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        for solver_name, source_setup, expected_tests in [
+            (
+                "z3",
+                lambda workspace_root: (
+                    (workspace_root / "z3").mkdir(),
+                    (workspace_root / "z3test" / "regressions" / "smt2" / "nested").mkdir(parents=True),
+                    (workspace_root / "z3test" / "regressions" / "smt2" / "a.smt2").write_text(
+                        "(check-sat)\n",
+                        encoding="utf-8",
+                    ),
+                    (workspace_root / "z3test" / "regressions" / "smt2" / "nested" / "b.smt").write_text(
+                        "(check-sat)\n",
+                        encoding="utf-8",
+                    ),
+                    (workspace_root / "z3test" / "regressions" / "smt2" / "ignored.txt").write_text(
+                        "ignore\n",
+                        encoding="utf-8",
+                    ),
+                ),
+                ["regressions/smt2/a.smt2", "regressions/smt2/nested/b.smt"],
+            ),
+            (
+                "opensmt",
+                lambda workspace_root: (
+                    (workspace_root / "opensmt").mkdir(),
+                    (workspace_root / "opensmt" / "test" / "regression" / "nested").mkdir(parents=True),
+                    (workspace_root / "opensmt" / "test" / "regression" / "alpha.smt2").write_text(
+                        "(check-sat)\n",
+                        encoding="utf-8",
+                    ),
+                    (workspace_root / "opensmt" / "test" / "regression" / "nested" / "beta.smt").write_text(
+                        "(check-sat)\n",
+                        encoding="utf-8",
+                    ),
+                    (workspace_root / "opensmt" / "test" / "regression" / "ignored.txt").write_text(
+                        "ignore\n",
+                        encoding="utf-8",
+                    ),
+                ),
+                ["alpha.smt2", "nested/beta.smt"],
+            ),
+        ]:
+            with self.subTest(solver=solver_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace_root = Path(tmp)
+                    source_setup(workspace_root)
+
+                    validate = subprocess.run(
+                        [
+                            "python3",
+                            str(repo_root / "scripts" / "solver_fuzzing_brain.py"),
+                            "--contract",
+                            str(repo_root / "contracts" / "solvers" / f"{solver_name}.yml"),
+                            "validate",
+                            "--json",
+                        ],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(validate.returncode, 0, msg=validate.stderr)
+                    self.assertEqual(json.loads(validate.stdout)["status"], "ok")
+
+                    prepare = subprocess.run(
+                        [
+                            "python3",
+                            str(repo_root / "scripts" / "solver_fuzzing_brain.py"),
+                            "--contract",
+                            str(repo_root / "contracts" / "solvers" / f"{solver_name}.yml"),
+                            "--workspace-root",
+                            str(workspace_root),
+                            "prepare-seeds",
+                            "--json",
+                        ],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(prepare.returncode, 0, msg=prepare.stderr)
+                    payload = json.loads(prepare.stdout)
+                    self.assertEqual(payload["tests"], expected_tests)
+                    self.assertEqual(payload["total_tests"], len(expected_tests))
+                    brain = SolverFuzzingBrain(
+                        repo_root / "contracts" / "solvers" / f"{solver_name}.yml",
+                        workspace_root=workspace_root,
+                    )
+                    self.assertEqual(payload["seeds_dir"], str(brain.resolve_seeds_dir()))
+                    self.assertEqual(brain.discover_tests(), expected_tests)
 
     def test_reference_contract_path_defaults_to_repo_root(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

@@ -31,6 +31,7 @@ jobs:
     with:
       solver_name: z3
       contract_path: contracts/solvers/z3.yml
+      run_mode: smoke
       commit_hash: "${{ inputs.z3_commit_hash }}"
       smoke_test_limit: "${{ inputs.smoke_test_limit }}"
       stop_buffer_minutes: "${{ inputs.stop_buffer_minutes }}"
@@ -42,4 +43,5 @@ jobs:
     with:
       solver_name: z3
       contract_path: contracts/solvers/z3.yml
+      run_mode: production
     secrets: inherit

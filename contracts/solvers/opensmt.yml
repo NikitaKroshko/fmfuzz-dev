@@ -1,15 +1,11 @@
 solver_name: opensmt
 repository_url: https://github.com/usi-verification-and-security/OpenSMT.git
-repository_path: opensmt
 issues_url: null
-tests_repository_url: null
-tests_repository_path: null
-build_command: scripts/opensmt/build.sh
-coverage_build_command: scripts/opensmt/build.sh --instrumentation
+build_script: scripts/opensmt/build.sh
 production_binary_path: build/bin/opensmt
 coverage_binary_path: build/bin/opensmt
-test_root: test/regression
-test_discovery_command: scripts/opensmt/test.sh --discover
+tests_script: scripts/opensmt/tests.sh
+seeds_dir: FUZZING_SEEDS
 target_commands:
   - "{reference_binary} --check-models --check-proofs --strings-exp"
   - "{target_binary}"
