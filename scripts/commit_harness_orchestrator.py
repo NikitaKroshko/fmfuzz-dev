@@ -171,9 +171,10 @@ class CommitHarnessRunner:
         """Resolve the worker count, clamping to available CPU cores."""
         if num_workers > self.cpu_count:
             print(
-                f"[WARN] Requested {num_workers} workers but only {
-                    self.cpu_count} CPU cores available, using {
-                    self.cpu_count} workers", file=sys.stderr, )
+                f"[WARN] Requested {num_workers} workers but only {self.cpu_count} "
+                f"CPU cores available, using {self.cpu_count} workers",
+                file=sys.stderr,
+            )
             return self.cpu_count
         elif num_workers > 0 and num_workers <= self.cpu_count:
             return num_workers
@@ -189,33 +190,34 @@ class CommitHarnessRunner:
         """Resolve the job timeout window from explicit or derived inputs."""
         if time_remaining is not None:
             time_remaining_temp = time_remaining
+            time_remaining_minutes = time_remaining / 60
             print(
-                f"[DEBUG] Using provided time_remaining: {time_remaining}s ({
-                    time_remaining /
-                    60:.1f} minutes)")
+                f"[DEBUG] Using provided time_remaining: {time_remaining}s "
+                f"({time_remaining_minutes:.1f} minutes)"
+            )
             return time_remaining_temp
         elif job_start_time is not None:
             time_remaining_temp = self._compute_time_remaining(
                 job_start_time, stop_buffer_minutes)
-            print(
-                f"[DEBUG] Job start time: {job_start_time} ({
-                    time.ctime(job_start_time)})")
-            print(
-                f"[DEBUG] Script start time: {
-                    self.start_time} ({
-                    time.ctime(
-                        self.start_time)})")
+            job_start_text = time.ctime(job_start_time)
+            script_start_text = time.ctime(self.start_time)
             build_time = self.start_time - job_start_time
             print(
-                f"[DEBUG] Build time: {
-                    build_time:.1f}s ({
-                    build_time /
-                    60:.1f} minutes)")
+                f"[DEBUG] Job start time: {job_start_time} ({job_start_text})"
+            )
+            print(
+                f"[DEBUG] Script start time: {self.start_time} "
+                f"({script_start_text})"
+            )
+            print(
+                f"[DEBUG] Build time: {build_time:.1f}s "
+                f"({build_time / 60:.1f} minutes)"
+            )
             print(f"[DEBUG] Stop buffer: {stop_buffer_minutes} minutes")
             print(
-                f"[DEBUG] Computed remaining time: {time_remaining_temp}s ({
-                    time_remaining_temp /
-                    60:.1f} minutes)")
+                f"[DEBUG] Computed remaining time: {time_remaining_temp}s "
+                f"({time_remaining_temp / 60:.1f} minutes)"
+            )
             return time_remaining_temp
         else:
             print("[DEBUG] No timeout set (running indefinitely)")
@@ -753,61 +755,62 @@ class CommitHarnessRunner:
         print(f"\nBUGS SUMMARY:", file=sys.stderr)
         print(f"  Total bugs found: {total_bugs}", file=sys.stderr)
         print(
-            f"  Main bugs folder: {main_bug_count} bugs, {
-                main_bugs_size_mb:.2f} MB disk space",
-            file=sys.stderr)
+            f"  Main bugs folder: {main_bug_count} bugs, "
+            f"{main_bugs_size_mb:.2f} MB disk space",
+            file=sys.stderr,
+        )
         print(f"  Worker folders:", file=sys.stderr)
         for info in worker_folders_info:
             print(f"    worker_{info['id']}:", file=sys.stderr)
+            worker_bugs_count = info["bugs"]
+            worker_bugs_size_mb = info["bugs_size_mb"]
+            worker_scratch_size_mb = info["scratch_size_mb"]
+            worker_log_size_mb = info["log_size_mb"]
+            worker_total_size_mb = info["total_size_mb"]
             print(
-                f"      bugs: {
-                    info['bugs']} bugs, {
-                    info['bugs_size_mb']:.2f} MB disk space",
-                file=sys.stderr)
+                f"      bugs: {worker_bugs_count} bugs, "
+                f"{worker_bugs_size_mb:.2f} MB disk space",
+                file=sys.stderr,
+            )
             print(
-                f"      scratch: {
-                    info['scratch_size_mb']:.2f} MB disk space",
-                file=sys.stderr)
+                f"      scratch: {worker_scratch_size_mb:.2f} MB disk space",
+                file=sys.stderr,
+            )
             print(
-                f"      logs: {
-                    info['log_size_mb']:.2f} MB disk space",
-                file=sys.stderr)
+                f"      logs: {worker_log_size_mb:.2f} MB disk space",
+                file=sys.stderr,
+            )
             print(
-                f"      total: {
-                    info['total_size_mb']:.2f} MB disk space",
-                file=sys.stderr)
+                f"      total: {worker_total_size_mb:.2f} MB disk space",
+                file=sys.stderr,
+            )
 
         print(f"\nSTATISTICS:", file=sys.stderr)
+        tests_processed = self.stats.get("tests_processed", 0)
+        bugs_found = self.stats.get("bugs_found", 0)
+        tests_requeued = self.stats.get("tests_requeued", 0)
+        tests_removed_unsupported = self.stats.get("tests_removed_unsupported", 0)
+        tests_removed_timeout = self.stats.get("tests_removed_timeout", 0)
         print(
-            f"  Tests processed: {
-                self.stats.get(
-                    'tests_processed',
-                    0)}",
-            file=sys.stderr)
+            f"  Tests processed: {tests_processed}",
+            file=sys.stderr,
+        )
         print(
-            f"  Bugs found: {
-                self.stats.get(
-                    'bugs_found',
-                    0)}",
-            file=sys.stderr)
+            f"  Bugs found: {bugs_found}",
+            file=sys.stderr,
+        )
         print(
-            f"  Tests requeued (bugs found): {
-                self.stats.get(
-                    'tests_requeued',
-                    0)}",
-            file=sys.stderr)
+            f"  Tests requeued (bugs found): {tests_requeued}",
+            file=sys.stderr,
+        )
         print(
-            f"  Tests removed (unsupported): {
-                self.stats.get(
-                    'tests_removed_unsupported',
-                    0)}",
-            file=sys.stderr)
+            f"  Tests removed (unsupported): {tests_removed_unsupported}",
+            file=sys.stderr,
+        )
         print(
-            f"  Tests removed (timeout): {
-                self.stats.get(
-                    'tests_removed_timeout',
-                    0)}",
-            file=sys.stderr)
+            f"  Tests removed (timeout): {tests_removed_timeout}",
+            file=sys.stderr,
+        )
 
         print("\n" + "=" * 60, file=sys.stderr)
         print("Stopping harness to preserve found bugs...", file=sys.stderr)
@@ -835,8 +838,8 @@ class CommitHarnessRunner:
         parsed = shlex.split(value)
         if not parsed:
             raise ValueError(
-                f"Target identifier resolved to empty argv: {
-                    identifier!r}")
+                f"Target identifier resolved to empty argv: {identifier!r}"
+            )
         return parsed
 
     def _build_target_commands(
@@ -1098,8 +1101,8 @@ class CommitHarnessRunner:
         if exit_code == self.EXIT_CODE_BUGS_FOUND:
             if bug_files:
                 print(
-                    f"[WORKER {worker_id}] ✓ Exit code 10: Found {
-                        len(bug_files)} bug(s) on {test_name}",
+                    f"[WORKER {worker_id}] ✓ Exit code 10: Found "
+                    f"{len(bug_files)} bug(s) on {test_name}",
                     flush=True,
                 )
                 self._persist_bug_files(worker_id, bug_files)
@@ -1139,8 +1142,8 @@ class CommitHarnessRunner:
                 return 'requeue'
             else:
                 print(
-                    f"[WORKER {worker_id}] Exit code 0: {test_name} (runtime: {
-                        runtime:.1f}s) - bugs found, requeuing",
+                    f"[WORKER {worker_id}] Exit code 0: {test_name} "
+                    f"(runtime: {runtime:.1f}s) - bugs found, requeuing",
                     flush=True,
                 )
                 return 'requeue'
@@ -1269,43 +1272,30 @@ class CommitHarnessRunner:
 
     def run(self) -> int:
         """Start workers, monitor execution, and print the final summary."""
+        job_suffix = f" for job {self.job_id}" if self.job_id else ""
         if not self.tests:
-            print(
-                f"No tests provided{
-                    ' for job ' +
-                    self.job_id if self.job_id else ''}",
-                flush=True,
-            )
+            print(f"No tests provided{job_suffix}", flush=True)
             return 0
 
-        print(
-            f"Running harness on {
-                len(
-                    self.tests)} test(s){
-                ' for job ' +
-                self.job_id if self.job_id else ''}",
-            flush=True,
-        )
+        print(f"Running harness on {len(self.tests)} test(s){job_suffix}", flush=True)
         print(f"Tests root: {self.tests_root}", flush=True)
-        print(
-            f"Timeout: {
-                self.time_remaining}s ({
-                self.time_remaining //
-                60} minutes)" if self.time_remaining else "No timeout",
-            flush=True,
+        timeout_text = (
+            f"{self.time_remaining}s ({self.time_remaining // 60} minutes)"
+            if self.time_remaining
+            else "No timeout"
         )
+        print(f"Timeout: {timeout_text}", flush=True)
         print(f"Iterations per test: {self.iterations}", flush=True)
         print(f"Modulo: {self.modulo}", flush=True)
         print(f"CPU cores: {self.cpu_count}", flush=True)
         print(f"Workers: {self.num_workers}", flush=True)
         print(f"Strict mode: {self.strict_mode}", flush=True)
-        print(
-            "Targets: " +
-            (", ".join(
-                shlex.join(command) for command in self.target_commands)
-             if self.target_commands else "(none)"),
-            flush=True,
+        target_text = (
+            ", ".join(shlex.join(command) for command in self.target_commands)
+            if self.target_commands
+            else "(none)"
         )
+        print(f"Targets: {target_text}", flush=True)
         print(f"Harness template: {self.harness_template}", flush=True)
         print(flush=True)
 
@@ -1383,10 +1373,8 @@ class CommitHarnessRunner:
 
         print()
         print("=" * 60)
-        print(
-            f"FINAL BUG SUMMARY{
-                ' FOR JOB ' +
-                self.job_id if self.job_id else ''}")
+        summary_suffix = f" FOR JOB {self.job_id}" if self.job_id else ""
+        print(f"FINAL BUG SUMMARY{summary_suffix}")
         print("=" * 60)
 
         bug_files = self._collect_bug_files(self.bugs_folder)
@@ -1434,21 +1422,13 @@ class CommitHarnessRunner:
         print("Statistics:")
         print(f"  Tests processed: {self.stats.get('tests_processed', 0)}")
         print(f"  Bugs found: {self.stats.get('bugs_found', 0)}")
+        print(f"  Tests requeued (bugs found): {self.stats.get('tests_requeued', 0)}")
         print(
-            f"  Tests requeued (bugs found): {
-                self.stats.get(
-                    'tests_requeued',
-                    0)}")
+            f"  Tests removed (unsupported): {self.stats.get('tests_removed_unsupported', 0)}"
+        )
         print(
-            f"  Tests removed (unsupported): {
-                self.stats.get(
-                    'tests_removed_unsupported',
-                    0)}")
-        print(
-            f"  Tests removed (timeout): {
-                self.stats.get(
-                    'tests_removed_timeout',
-                    0)}")
+            f"  Tests removed (timeout): {self.stats.get('tests_removed_timeout', 0)}"
+        )
         print("=" * 60)
         if self.strict_mode:
             return int(self.strict_exit_code.value)
