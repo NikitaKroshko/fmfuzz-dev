@@ -142,6 +142,13 @@ jobs:
             sudo apt-get install -y $PACKAGES
           fi
 
+      - name: Resolve contract storage layout
+        run: |
+          BUILD_ARTIFACT_S3_PREFIX=$(jq -r '.build_artifact_s3_prefix' contract.json)
+          COVERAGE_MAPPING_S3_PREFIX=$(jq -r '.coverage_mapping_s3_prefix' contract.json)
+          echo "BUILD_ARTIFACT_S3_PREFIX=$BUILD_ARTIFACT_S3_PREFIX" >> "$GITHUB_ENV"
+          echo "COVERAGE_MAPPING_S3_PREFIX=$COVERAGE_MAPPING_S3_PREFIX" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials
         if: needs.select-target.outputs.run_mode == 'production'
         uses: aws-actions/configure-aws-credentials@v5.1.0
@@ -185,10 +192,10 @@ jobs:
           mkdir -p artifacts
           BUILD="${{ needs.select-target.outputs.latest_build }}"
           aws s3 cp \
-            "s3://${{ secrets.AWS_S3_BUCKET }}/solvers/${{ inputs.solver_name }}/builds/v2/production/${BUILD}.tar.gz" \
+            "s3://${{ secrets.AWS_S3_BUCKET }}/${BUILD_ARTIFACT_S3_PREFIX}/${BUILD}.tar.gz" \
             artifacts/production.tar.gz
           aws s3 cp \
-            "s3://${{ secrets.AWS_S3_BUCKET }}/solvers/${{ inputs.solver_name }}/coverage-mappings/coverage_mapping-${BUILD}.json.gz" \
+            "s3://${{ secrets.AWS_S3_BUCKET }}/${COVERAGE_MAPPING_S3_PREFIX}/coverage_mapping-${BUILD}.json.gz" \
             coverage_mapping.json.gz
           REPO_PATH=$(jq -r '.repository_path' contract.json)
           tar -xzf artifacts/production.tar.gz -C "$REPO_PATH"
@@ -276,6 +283,13 @@ jobs:
             sudo apt-get install -y $PACKAGES
           fi
 
+      - name: Resolve contract storage layout
+        run: |
+          BUILD_ARTIFACT_S3_PREFIX=$(jq -r '.build_artifact_s3_prefix' contract.json)
+          COVERAGE_MAPPING_S3_PREFIX=$(jq -r '.coverage_mapping_s3_prefix' contract.json)
+          echo "BUILD_ARTIFACT_S3_PREFIX=$BUILD_ARTIFACT_S3_PREFIX" >> "$GITHUB_ENV"
+          echo "COVERAGE_MAPPING_S3_PREFIX=$COVERAGE_MAPPING_S3_PREFIX" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials
         if: needs.select-target.outputs.run_mode == 'production'
         uses: aws-actions/configure-aws-credentials@v5.1.0
@@ -311,7 +325,7 @@ jobs:
             describe \
             --json > contract.json
           aws s3 cp \
-            "s3://${{ secrets.AWS_S3_BUCKET }}/solvers/${{ inputs.solver_name }}/builds/v2/production/${BUILD}.tar.gz" \
+            "s3://${{ secrets.AWS_S3_BUCKET }}/${BUILD_ARTIFACT_S3_PREFIX}/${BUILD}.tar.gz" \
             production.tar.gz
           REPO_PATH=$(jq -r '.repository_path' contract.json)
           tar -xzf production.tar.gz -C "$REPO_PATH"

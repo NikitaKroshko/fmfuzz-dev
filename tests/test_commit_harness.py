@@ -452,12 +452,19 @@ index 1111111..2222222 100644
         self.assertIn("prepare-commit", reusable_text)
         self.assertIn("run-harness", reusable_text)
         self.assertIn("coverage_mapping.json.gz", reusable_text)
+        self.assertIn("Resolve contract storage layout", reusable_text)
+        self.assertIn("jq -r '.build_artifact_s3_prefix' contract.json", reusable_text)
+        self.assertIn("jq -r '.coverage_mapping_s3_prefix' contract.json", reusable_text)
+        self.assertIn("build_artifact_s3_prefix", reusable_text)
+        self.assertIn("coverage_mapping_s3_prefix", reusable_text)
         self.assertIn("increment", reusable_text)
         self.assertIn("run_mode", reusable_text)
         self.assertIn("run_mode == 'production'", reusable_text)
         self.assertIn("run_mode != 'production'", reusable_text)
         self.assertNotIn("inputs.smoke_test_limit == '0'", reusable_text)
         self.assertNotIn("LOCAL_TEST_LIMIT", reusable_text)
+        self.assertNotIn("solvers/${{ inputs.solver_name }}/builds/v2/production", reusable_text)
+        self.assertNotIn("solvers/${{ inputs.solver_name }}/coverage-mappings/coverage_mapping-", reusable_text)
 
     def test_commit_fuzzer_manual_smoke_does_not_require_aws_template_secrets(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

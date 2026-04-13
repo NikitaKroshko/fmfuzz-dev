@@ -15,38 +15,28 @@ if str(ROOT) not in sys.path:
 from scripts.solver_fuzzing_brain import SolverFuzzingBrain
 
 
-CONTRACTS = {
-    "cvc5": ROOT / "contracts" / "solvers" / "cvc5.yml",
-    "z3": ROOT / "contracts" / "solvers" / "z3.yml",
-    "opensmt": ROOT / "contracts" / "solvers" / "opensmt.yml",
-}
-
-
-def _default_contract_for_solver(solver: str) -> Path | None:
-    if solver in CONTRACTS:
-        return CONTRACTS[solver]
+def _resolve_contract_path(solver: str | None, explicit_contract: Path | None = None) -> Path | None:
+    if explicit_contract is not None:
+        return explicit_contract
+    if solver is None:
+        return None
     candidate = ROOT / "contracts" / "solvers" / f"{solver}.yml"
     return candidate if candidate.exists() else None
 
 
-def _workspace_root_for_solver(
-    solver: str,
+def _workspace_root_from_paths(
     *,
     build_dir: Path | None,
     z3test_dir: Path | None,
     opensmt_dir: Path | None,
 ) -> Path:
-    if solver == "cvc5":
-        if build_dir is None:
-            raise ValueError("--build-dir is required for cvc5")
+    if build_dir is not None:
         return build_dir.resolve().parent.parent
-    if solver == "z3":
-        if z3test_dir is None:
-            raise ValueError("--z3test-dir is required for z3")
+    if z3test_dir is not None:
         return z3test_dir.resolve().parent
-    if opensmt_dir is None:
-        raise ValueError("--opensmt-dir is required for opensmt")
-    return opensmt_dir.resolve().parent
+    if opensmt_dir is not None:
+        return opensmt_dir.resolve().parent
+    return ROOT
 
 
 def count_solver_tests(
@@ -58,20 +48,22 @@ def count_solver_tests(
     z3test_dir: Path | None = None,
     opensmt_dir: Path | None = None,
 ) -> dict:
-    contract_path = contract or _default_contract_for_solver(solver)
+    contract_path = _resolve_contract_path(solver, contract)
     if contract_path is None:
         raise ValueError(f"no contract found for solver `{solver}`; pass --contract")
+    if build_dir is not None and not build_dir.exists():
+        raise ValueError("--build-dir must exist")
+    if z3test_dir is not None and not z3test_dir.exists():
+        raise ValueError("--z3test-dir must exist")
+    if opensmt_dir is not None and not opensmt_dir.exists():
+        raise ValueError("--opensmt-dir must exist")
     resolved_workspace_root = workspace_root
     if resolved_workspace_root is None:
-        if solver in CONTRACTS and (build_dir or z3test_dir or opensmt_dir):
-            resolved_workspace_root = _workspace_root_for_solver(
-                solver,
-                build_dir=build_dir,
-                z3test_dir=z3test_dir,
-                opensmt_dir=opensmt_dir,
-            )
-        else:
-            resolved_workspace_root = ROOT
+        resolved_workspace_root = _workspace_root_from_paths(
+            build_dir=build_dir,
+            z3test_dir=z3test_dir,
+            opensmt_dir=opensmt_dir,
+        )
     brain = SolverFuzzingBrain(contract_path, workspace_root=resolved_workspace_root)
     return brain.count_tests()
 
@@ -99,31 +91,18 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    derived_contract = args.contract or (_default_contract_for_solver(args.solver) if args.solver else None)
-    if args.contract or (args.solver not in CONTRACTS and derived_contract is not None):
-        solver = args.solver or "custom"
+    contract_path = _resolve_contract_path(args.solver, args.contract)
+    if contract_path is not None:
         payload = count_solver_tests(
-            solver,
-            contract=derived_contract,
+            args.solver or "custom",
+            contract=contract_path,
             workspace_root=args.workspace_root,
             build_dir=args.build_dir,
             z3test_dir=args.z3test_dir,
             opensmt_dir=args.opensmt_dir,
         )
-    elif args.solver == "cvc5":
-        if not args.build_dir or not args.build_dir.exists():
-            parser.error("--build-dir is required for cvc5 and must exist")
-        payload = count_cvc5_tests(args.build_dir)
-    elif args.solver == "z3":
-        if not args.z3test_dir or not args.z3test_dir.exists():
-            parser.error("--z3test-dir is required for z3 and must exist")
-        payload = count_z3_tests(args.z3test_dir)
-    elif args.solver == "opensmt":
-        if not args.opensmt_dir or not args.opensmt_dir.exists():
-            parser.error("--opensmt-dir is required for opensmt and must exist")
-        payload = count_opensmt_tests(args.opensmt_dir)
     else:
-        parser.error("provide one of cvc5, z3, opensmt, or pass --contract")
+        parser.error("pass --contract or provide a solver name with a matching contract file")
 
     rendered = json.dumps(payload, indent=2) + "\n"
     if args.output:

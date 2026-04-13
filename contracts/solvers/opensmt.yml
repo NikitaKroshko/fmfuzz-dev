@@ -39,4 +39,4 @@ artifact_paths:
   - build/src
   - build/deps
 artifact_s3_bucket: null
-artifact_s3_prefix: null
+artifact_s3_prefix: solvers/opensmt/builds/v2

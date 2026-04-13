@@ -4,12 +4,11 @@ repository_path: cvc5
 issues_url: null
 tests_repository_url: null
 tests_repository_path: null
-build_command: scripts/cvc5/build.sh
-coverage_build_command: scripts/cvc5/build.sh --instrumentation
+build_script: scripts/cvc5/build.sh
 production_binary_path: build/bin/cvc5
 coverage_binary_path: build/bin/cvc5
-test_root: test/regress/cli
-test_discovery_command: scripts/cvc5/test.sh --discover
+tests_script: scripts/cvc5/tests.sh
+seeds_dir: FUZZING_SEEDS
 target_commands:
   - "{reference_binary}"
   - "{target_binary} --check-models --check-proofs --strings-exp"
@@ -48,4 +47,4 @@ artifact_paths:
   - build/src
   - build/deps
 artifact_s3_bucket: null
-artifact_s3_prefix: null
+artifact_s3_prefix: solvers/cvc5/builds/v2

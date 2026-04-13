@@ -210,20 +210,19 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
     tests_script = _optional_string(data.get("tests_script"))
     tests_command = _optional_string(data.get("tests_command")) or tests_script
     seeds_dir = _optional_string(data.get("seeds_dir"))
-    if tests_command and not seeds_dir:
-        seeds_dir = "FUZZING_SEEDS"
     test_root = _optional_string(data.get("test_root"))
     test_discovery_command = _optional_string(data.get("test_discovery_command"))
     if not test_root and not test_discovery_command and not tests_command:
         raise ContractError(
-            f"missing `test_discovery_command` or `test_root` for solver "
+            f"missing preferred seed path or legacy discovery path for solver "
             f"`{solver_name}` in `{contract_path.name}`",
             solver_name=solver_name,
             repository_url=repository_url,
-            command="tests_script or test_discovery_command",
+            command="tests_script",
             hint=(
-                "provide `tests_script`/`tests_command` for FUZZING_SEEDS, or keep "
-                "legacy `test_discovery_command`/`test_root`"
+                "prefer `tests_script`/`tests_command` with `seeds_dir: FUZZING_SEEDS`; "
+                "use `test_discovery_command`/`test_root` only when the solver has not "
+                "adopted the contract-first seed path yet"
             ),
             issues_url=derive_github_issues_url(repository_url),
         )
@@ -239,6 +238,16 @@ def _build_contract(contract_path: Path, data: Dict[str, Any]) -> SolverContract
             solver_name=solver_name,
             repository_url=repository_url,
             hint="remove `tests_repository_path` or add `tests_repository_url`",
+            issues_url=derive_github_issues_url(repository_url),
+        )
+    if tests_command and not seeds_dir:
+        raise ContractError(
+            f"solver `{solver_name}` in `{contract_path.name}` must provide `seeds_dir` "
+            "when `tests_script` or `tests_command` is set",
+            solver_name=solver_name,
+            repository_url=repository_url,
+            command="tests_script",
+            hint="add `seeds_dir: FUZZING_SEEDS` alongside the tests script",
             issues_url=derive_github_issues_url(repository_url),
         )
 

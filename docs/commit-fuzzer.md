@@ -21,6 +21,8 @@ coverage_binary_path: build/demo-cov
 tests_script: tests.sh
 seeds_dir: FUZZING_SEEDS
 
+artifact_s3_prefix: solvers/demo/builds/v2
+
 target_commands:
   - "{target_binary}"
 
@@ -88,7 +90,7 @@ cp tests/regress/*.smt2 "$seed_dir"/
 - The tests script must leave a directory or stable symlink at `$FUZZING_SEEDS`.
 - Only `.smt` and `.smt2` files are scheduled by the generic seed path.
 - Test names are relative to `FUZZING_SEEDS`.
-- Legacy `test_discovery_command` takes precedence when present.
+- Legacy `test_discovery_command` and `test_root` remain compatibility fallbacks.
 
 ### Validation
 Run this before wiring a new workflow:
@@ -114,12 +116,14 @@ Validation errors use `BrainError` or `ContractError` formatting with solver, st
 Scheduled commit fuzzing uses `.github/workflows/solver-commit-fuzzer.yml`:
 1. `scripts/scheduling/fuzzer.py <solver> select --json` selects `(commit_to_fuzz, latest_build)` from S3 state.
 2. The workflow checks out the repository at `latest_build`.
-3. It downloads the production build artifact and coverage mapping for `latest_build`.
+3. It resolves the production build and coverage mapping S3 prefixes from the contract and downloads the artifacts for `latest_build`.
 4. It calls `prepare-commit` through the contract to create a commit-targeted matrix for `commit_to_fuzz`.
 5. It runs `run-harness` over the matrix.
 6. It calls `scripts/scheduling/fuzzer.py <solver> increment <commit>` after attempted fuzzing.
 
+The reusable workflow consumes the brain-resolved `build_artifact_s3_prefix` and `coverage_mapping_s3_prefix` fields, so new solvers only need to keep their contract layout aligned.
+
 Manual smoke fuzzing is still available through the wrapper input `smoke_test_limit`. The production path does not use `LOCAL_TEST_LIMIT`.
 
 ### Existing Solvers
-`cvc5`, `z3`, and `opensmt` still use their current contracts and legacy discovery commands. Their wrappers now delegate to reusable generic workflows.
+`cvc5`, `z3`, and `opensmt` are the reference contract-first examples. They now use `build_script`, `tests_script`, and `seeds_dir`, with the reusable workflows resolving the S3 layout from the contract instead of solver-specific string assembly.

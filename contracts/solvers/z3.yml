@@ -33,4 +33,4 @@ artifact_paths:
   - build/include
   - build/src
 artifact_s3_bucket: null
-artifact_s3_prefix: null
+artifact_s3_prefix: solvers/z3/builds/v2

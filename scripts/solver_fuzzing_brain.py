@@ -399,11 +399,12 @@ class SolverFuzzingBrain:
                 solver_name=self.contract.solver_name,
                 repository_url=self.contract.repository_url,
                 step="seed preparation",
-                message="contract does not declare a tests script or tests command",
+                message="contract does not declare the preferred tests script",
                 issues_url=self.contract.resolved_issues_url,
                 hint=(
-                    f"add `tests_script` or `tests_command` to `{self.contract.contract_path.name}`, "
-                    "or keep using legacy `test_discovery_command`"
+                    f"add `tests_script` or `tests_command` to `{self.contract.contract_path.name}` "
+                    "with `seeds_dir: FUZZING_SEEDS`; use legacy `test_discovery_command`/`test_root` "
+                    "only when the solver has not adopted the seed path yet"
                 ),
                 category="bad contract problem",
             )
@@ -419,7 +420,10 @@ class SolverFuzzingBrain:
             context=context,
             log_path=optional_log,
             category="bad contract problem",
-            hint="fix `tests_script`/`tests_command` so it creates FUZZING_SEEDS with .smt/.smt2 files",
+            hint=(
+                "fix `tests_script`/`tests_command` so it populates $FUZZING_SEEDS "
+                "with stable .smt or .smt2 files"
+            ),
             cwd=self.layout.solver_workspace,
             extra_env={"FUZZING_SEEDS": str(seeds_root)},
         )
@@ -433,7 +437,10 @@ class SolverFuzzingBrain:
                 log_path=result.log_path,
                 stderr=result.stderr,
                 issues_url=self.contract.resolved_issues_url,
-                hint="create the directory named by $FUZZING_SEEDS, or configure `seeds_dir`",
+                hint=(
+                    "create the directory named by $FUZZING_SEEDS from `tests_script`/`tests_command`, "
+                    "or configure `seeds_dir`"
+                ),
                 category="bad contract problem",
             )
         if not seeds_root.is_dir():
@@ -446,7 +453,7 @@ class SolverFuzzingBrain:
                 log_path=result.log_path,
                 stderr=result.stderr,
                 issues_url=self.contract.resolved_issues_url,
-                hint="`tests.sh` must create a directory, stable symlink, or populated folder",
+                hint="`tests_script`/`tests_command` must leave a directory, stable symlink, or populated folder",
                 category="bad contract problem",
             )
 
@@ -457,9 +464,13 @@ class SolverFuzzingBrain:
         self._ensure_workspace_exists()
         optional_log = Path(log_path).resolve() if log_path else None
         discovery_stderr: Optional[str] = None
+        discovery_hint = "fix `test_discovery_command` or `test_root` so at least one test is discovered"
+        discovery_message = "test discovery produced zero tests"
 
         if self.contract.tests_command:
             _, tests = self.prepare_seeds(log_path=optional_log)
+            discovery_hint = "populate $FUZZING_SEEDS with stable .smt or .smt2 files"
+            discovery_message = "tests script produced zero SMT seeds"
         elif self.contract.test_discovery_command:
             result = self._run_command(
                 step="test discovery",
@@ -468,8 +479,8 @@ class SolverFuzzingBrain:
                 log_path=optional_log,
                 category="bad contract problem",
                 hint=(
-                    "fix `test_discovery_command` or provide `test_root` if simple recursive "
-                    "discovery is enough"
+                    "fix `test_discovery_command` or `test_root`; this compatibility path is "
+                    "only used when the solver has not adopted `tests_script` yet"
                 ),
             )
             discovery_stderr = result.stderr
@@ -497,11 +508,11 @@ class SolverFuzzingBrain:
                 solver_name=self.contract.solver_name,
                 repository_url=self.contract.repository_url,
                 step="test discovery",
-                message="test discovery produced zero tests",
+                message=discovery_message,
                 log_path=optional_log,
                 stderr=discovery_stderr,
                 issues_url=self.contract.resolved_issues_url,
-                hint="fix `test_discovery_command` or `test_root` so at least one test is discovered",
+                hint=discovery_hint,
                 category="bad contract problem",
             )
         return tests
@@ -539,7 +550,9 @@ class SolverFuzzingBrain:
         try:
             tests = self.discover_tests()
         except BrainError as exc:
-            if exc.step == "test discovery" and "zero tests" in exc.message:
+            if exc.step == "test discovery" and (
+                "zero tests" in exc.message or "zero SMT seeds" in exc.message
+            ):
                 return {"matrix": {"include": []}, "total_tests": 0, "total_jobs": 0}
             raise
         total_tests = len(tests)
@@ -1164,6 +1177,24 @@ class SolverFuzzingBrain:
         configured = self.contract.seeds_dir or "FUZZING_SEEDS"
         return self._resolve_path_value(configured, self.layout.tests_workspace)
 
+    def resolve_build_artifact_s3_prefix(self) -> str:
+        configured = (self.contract.artifact_s3_prefix or f"solvers/{self.contract.solver_name}/builds/v2").strip("/")
+        if configured.endswith("/production"):
+            return configured
+        return f"{configured}/production"
+
+    def resolve_coverage_mapping_s3_prefix(self) -> str:
+        configured = (self.contract.artifact_s3_prefix or f"solvers/{self.contract.solver_name}/builds/v2").strip("/")
+        if configured.endswith("/production"):
+            configured = configured[: -len("/production")].rstrip("/")
+        if configured.endswith("/coverage-mappings"):
+            return configured
+        if configured.endswith("/builds/v2"):
+            return f"{configured[:-len('/builds/v2')]}/coverage-mappings".rstrip("/")
+        if configured.endswith("/builds"):
+            return f"{configured[:-len('/builds')]}/coverage-mappings".rstrip("/")
+        return f"{configured}/coverage-mappings"
+
     def resolve_regression_working_directory(self) -> Path:
         configured = self.contract.regression_working_directory
         if not configured:
@@ -1430,7 +1461,7 @@ class SolverFuzzingBrain:
                 "tests_command",
                 self.contract.tests_command,
                 context,
-                "fix `tests_command` or `tests_script`",
+                "fix `tests_command` or `tests_script` so it populates $FUZZING_SEEDS with .smt/.smt2 files",
             )
             checked.append("tests_command")
         elif self.contract.test_discovery_command:
@@ -1438,7 +1469,7 @@ class SolverFuzzingBrain:
                 "test_discovery_command",
                 self.contract.test_discovery_command,
                 context,
-                "fix `test_discovery_command` or use `tests_script`",
+                "fix `test_discovery_command` or `test_root`; this is only the compatibility path when `tests_script` is absent",
             )
             checked.append("test_discovery_command")
         else:
@@ -1451,7 +1482,10 @@ class SolverFuzzingBrain:
                     message=f"test root does not exist: {test_root}",
                     command=str(test_root),
                     issues_url=self.contract.resolved_issues_url,
-                    hint=f"fix `test_root` in `{self.contract.contract_path.name}`",
+                    hint=(
+                        f"fix `test_root` in `{self.contract.contract_path.name}`; this "
+                        "compatibility path is only used when `tests_script` is absent"
+                    ),
                     category="bad contract problem",
                 )
             checked.append("test_root")
@@ -1546,6 +1580,17 @@ class SolverFuzzingBrain:
         seeds_payload: Optional[Dict[str, object]] = None
         if check_brain.contract.tests_command:
             seeds_dir, tests = check_brain.prepare_seeds()
+            if not tests:
+                raise BrainError(
+                    solver_name=check_brain.contract.solver_name,
+                    repository_url=check_brain.contract.repository_url,
+                    step="contract validation",
+                    message=f"FUZZING_SEEDS did not contain any .smt or .smt2 files: {seeds_dir}",
+                    command=check_brain.contract.tests_command,
+                    issues_url=check_brain.contract.resolved_issues_url,
+                    hint="populate $FUZZING_SEEDS with stable .smt or .smt2 files",
+                    category="bad contract problem",
+                )
             seeds_payload = {"seeds_dir": str(seeds_dir), "test_count": len(tests)}
 
         return {
@@ -1710,11 +1755,14 @@ class SolverFuzzingBrain:
         return normalized
 
     def _discover_smt_files(self, root: Path) -> List[str]:
-        return [
-            path.relative_to(root).as_posix()
-            for path in sorted(root.rglob("*"))
-            if path.is_file() and path.suffix.lower() in {".smt", ".smt2"}
-        ]
+        discovered: List[str] = []
+        for current_root, dirnames, filenames in os.walk(root, followlinks=True):
+            dirnames.sort()
+            for filename in sorted(filenames):
+                path = Path(current_root) / filename
+                if path.is_file() and path.suffix.lower() in {".smt", ".smt2"}:
+                    discovered.append(path.relative_to(root).as_posix())
+        return sorted(discovered)
 
     def _resolve_path_value(self, value: str, base: Path) -> Path:
         prefixes = {
@@ -2239,11 +2287,14 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--s3-prefix", default=None)
     collect.add_argument("--json", action="store_true")
 
-    discover = subparsers.add_parser("discover-tests", help="Run contract-driven test discovery")
+    discover = subparsers.add_parser("discover-tests", help="Run contract-first test discovery")
     discover.add_argument("--log-path", default=None)
     discover.add_argument("--json", action="store_true")
 
-    seeds = subparsers.add_parser("prepare-seeds", help="Run tests.sh/tests_command and discover FUZZING_SEEDS")
+    seeds = subparsers.add_parser(
+        "prepare-seeds",
+        help="Run the preferred tests script and discover FUZZING_SEEDS",
+    )
     seeds.add_argument("--log-path", default=None)
     seeds.add_argument("--json", action="store_true")
 
@@ -2384,6 +2435,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "artifact_s3_prefix": brain.contract.artifact_s3_prefix,
                 "build_command": brain.contract.build_command,
                 "build_script": brain.contract.build_script,
+                "build_artifact_s3_prefix": brain.resolve_build_artifact_s3_prefix(),
                 "commit_prepare_command": brain.contract.commit_prepare_command,
                 "contract_path": str(brain.contract.contract_path),
                 "coverage_average_test_time_seconds": brain.contract.coverage_average_test_time_seconds,
@@ -2391,6 +2443,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "coverage_build_command": brain.contract.coverage_build_command,
                 "coverage_mapper_command": brain.contract.coverage_mapper_command,
                 "coverage_target_job_count": brain.contract.coverage_target_job_count,
+                "coverage_mapping_s3_prefix": brain.resolve_coverage_mapping_s3_prefix(),
                 "environment_requirements": {
                     "env": list(brain.contract.environment_requirements.env),
                     "packages": list(brain.contract.environment_requirements.packages),

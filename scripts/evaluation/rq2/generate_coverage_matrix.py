@@ -17,20 +17,14 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.solver_contract import load_solver_contract
 from scripts.solver_fuzzing_brain import SolverFuzzingBrain
 
 
-CONTRACTS = {
-    "cvc5": ROOT / "contracts" / "solvers" / "cvc5.yml",
-    "z3": ROOT / "contracts" / "solvers" / "z3.yml",
-    "opensmt": ROOT / "contracts" / "solvers" / "opensmt.yml",
-}
-
-
-def _default_contract_for_solver(solver: str) -> Path | None:
-    if solver in CONTRACTS:
-        return CONTRACTS[solver]
+def _resolve_contract_path(solver: str | None, explicit_contract: Path | None = None) -> Path | None:
+    if explicit_contract is not None:
+        return explicit_contract
+    if solver is None:
+        return None
     candidate = ROOT / "contracts" / "solvers" / f"{solver}.yml"
     return candidate if candidate.exists() else None
 
@@ -66,9 +60,12 @@ def main() -> None:
     args = parser.parse_args()
 
     solver = args.solver
-    contract_path = args.contract or _default_contract_for_solver(solver)
+    contract_path = _resolve_contract_path(solver, args.contract)
     if contract_path is None:
-        raise RuntimeError(f"Unsupported solver without --contract: {solver}")
+        raise RuntimeError(
+            f"Unsupported solver without --contract: {solver}. "
+            "Pass --contract or add contracts/solvers/<solver>.yml"
+        )
 
     max_commits = args.max_commits
     selected_commits = _download_selected_commits(solver)
@@ -78,7 +75,6 @@ def main() -> None:
         selected_commits = selected_commits[:max_commits]
         print(f"📝 Limited to {len(selected_commits)} commits", file=sys.stderr)
 
-    contract = load_solver_contract(contract_path)
     brain = SolverFuzzingBrain(contract_path, workspace_root=args.workspace_root)
 
     first_commit = selected_commits[0]
@@ -115,7 +111,7 @@ def main() -> None:
         "total_commits": len(selected_commits),
         "total_chunks": len(chunks),
         "chunks_per_commit": len(chunks),
-        "repository_path": contract.repository_path,
+        "repository_path": brain.contract.repository_path,
     }
     print(json.dumps(output, separators=(",", ":")))
     print(

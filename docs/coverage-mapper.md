@@ -58,6 +58,8 @@ find tests -name '*.smt' -o -name '*.smt2' -exec cp {} "$FUZZING_SEEDS"/ \;
 ```
 
 The brain schedules only `.smt` and `.smt2` files relative to `FUZZING_SEEDS`.
+The reusable workflows also resolve the production build and coverage mapping S3 prefixes from the contract so solver onboarding does not require workflow edits for the storage layout.
+The resolved prefix fields are `build_artifact_s3_prefix` and `coverage_mapping_s3_prefix`.
 
 ### Commands
 
@@ -72,5 +74,6 @@ python3 scripts/solver_fuzzing_brain.py --contract contracts/solvers/demo.yml jo
 
 ### Workflow
 `.github/workflows/solver-coverage-mapper.yml` is solver-neutral. The cvc5, z3, and opensmt wrappers pass only the solver name and contract path, with legacy input names preserved for compatibility.
+Those built-in solver contracts are the contract-first examples: `build_script`, `tests_script`, and `seeds_dir` are the canonical fields, while `test_discovery_command` and `test_root` remain compatibility fallbacks.
 
 The daily check uses `.github/workflows/solver-coverage-daily-check.yml`, restores scheduled execution, counts tests through `scripts/coverage/count_tests.py --contract`, and triggers the generic mapper when S3 coverage state says the mapping is stale.
