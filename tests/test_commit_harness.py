@@ -764,6 +764,54 @@ index 1111111..2222222 100644
             combined_output = stdout.getvalue() + stderr.getvalue()
             self.assertIn("[WORKER 1] ✓ Exit code 10: Found 1 bug(s) on seed.smt2", combined_output)
 
+    def test_commit_harness_runner_prefers_explicit_time_remaining(self) -> None:
+        from scripts.commit_harness_orchestrator import CommitHarnessRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests_root = root / "tests"
+            tests_root.mkdir()
+
+            runner = CommitHarnessRunner(
+                tests=["seed.smt2"],
+                tests_root=str(tests_root),
+                bugs_folder=str(root / "bugs"),
+                num_workers=1,
+                iterations=1,
+                modulo=1,
+                time_remaining=1234,
+                job_start_time=0,
+                stop_buffer_minutes=5,
+                targets=None,
+                harness='["/bin/true"]',
+            )
+
+            self.assertEqual(runner.time_remaining, 1234)
+
+    def test_commit_harness_runner_uses_one_hour_job_budget_by_default(self) -> None:
+        from scripts.commit_harness_orchestrator import CommitHarnessRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests_root = root / "tests"
+            tests_root.mkdir()
+
+            runner = CommitHarnessRunner(
+                tests=["seed.smt2"],
+                tests_root=str(tests_root),
+                bugs_folder=str(root / "bugs"),
+                num_workers=1,
+                iterations=1,
+                modulo=1,
+                targets=None,
+                harness='["/bin/true"]',
+            )
+
+            self.assertEqual(
+                runner._compute_time_remaining(runner.start_time - 120, 5),
+                3180,
+            )
+
     def test_opensmt_prepare_commit_fuzzer_uses_commit_diff_and_matched_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)

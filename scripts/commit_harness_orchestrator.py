@@ -187,7 +187,14 @@ class CommitHarnessRunner:
             stop_buffer_minutes,
             time_remaining):
         """Resolve the job timeout window from explicit or derived inputs."""
-        if job_start_time is not None:
+        if time_remaining is not None:
+            time_remaining_temp = time_remaining
+            print(
+                f"[DEBUG] Using provided time_remaining: {time_remaining}s ({
+                    time_remaining /
+                    60:.1f} minutes)")
+            return time_remaining_temp
+        elif job_start_time is not None:
             time_remaining_temp = self._compute_time_remaining(
                 job_start_time, stop_buffer_minutes)
             print(
@@ -210,16 +217,24 @@ class CommitHarnessRunner:
                     time_remaining_temp /
                     60:.1f} minutes)")
             return time_remaining_temp
-        elif time_remaining is not None:
-            time_remaining_temp = time_remaining
-            print(
-                f"[DEBUG] Using provided time_remaining: {time_remaining}s ({
-                    time_remaining /
-                    60:.1f} minutes)")
-            return time_remaining_temp
         else:
             print("[DEBUG] No timeout set (running indefinitely)")
             return None
+
+    def _job_timeout_seconds(self) -> int:
+        """Return the GitHub Actions timeout budget for the current job."""
+        for env_name in ("FMFUZZ_JOB_TIMEOUT_SECONDS", "GITHUB_JOB_TIMEOUT_SECONDS"):
+            raw_timeout = os.environ.get(env_name)
+            if not raw_timeout:
+                continue
+            try:
+                timeout_seconds = int(raw_timeout)
+            except ValueError:
+                continue
+            if timeout_seconds > 0:
+                return timeout_seconds
+        # GitHub jobs in this repository are capped at 60 minutes.
+        return 3600
 
     # Validate required target identifiers are present when template needs
     # them.
@@ -907,12 +922,11 @@ class CommitHarnessRunner:
             job_start_time: float,
             stop_buffer_minutes: int) -> int:
         """Compute remaining runtime budget for the job in seconds."""
-        GITHUB_TIMEOUT = 21600
         MIN_REMAINING = 600
 
         build_time = self.start_time - job_start_time
         stop_buffer_seconds = stop_buffer_minutes * 60
-        available_time = GITHUB_TIMEOUT - build_time
+        available_time = self._job_timeout_seconds() - build_time
         remaining = available_time - stop_buffer_seconds
 
         if remaining < MIN_REMAINING:
