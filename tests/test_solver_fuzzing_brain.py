@@ -335,6 +335,64 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             self.assertEqual(matrix["total_tests"], 2)
             self.assertEqual(matrix["matrix"]["include"][0]["tests"], ["a.smt2", "nested/b.smt"])
 
+    def test_run_harness_materializes_seed_corpus_when_tests_root_is_implicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            solver_root = root / "solver"
+            solver_root.mkdir()
+            python_binary = sys.executable
+            tests_script = root / "tests.sh"
+            self._write_executable(
+                tests_script,
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                mkdir -p "${FUZZING_SEEDS}/nested"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/alpha.smt2"
+                printf '(check-sat)\\n' > "${FUZZING_SEEDS}/nested/beta.smt"
+                """,
+            )
+            contract = self._write_contract(
+                root / "solver.yml",
+                f"""\
+                solver_name: demo
+                repository_url: https://github.com/example/demo.git
+                repository_path: solver
+                build_command: {python_binary}
+                coverage_build_command: {python_binary} --instrumented
+                production_binary_path: {python_binary}
+                coverage_binary_path: {python_binary}
+                tests_script: {tests_script}
+                seeds_dir: FUZZING_SEEDS
+                target_commands:
+                  - "{{target_binary}}"
+                artifact_paths: []
+                """,
+            )
+
+            brain = SolverFuzzingBrain(contract, workspace_root=root)
+            captured: dict[str, object] = {}
+
+            def fake_run_commit_harness(**kwargs):
+                captured.update(kwargs)
+                return 0
+
+            with patch("scripts.commit_harness_runner.run_commit_harness", side_effect=fake_run_commit_harness):
+                exit_code = brain.run_harness(
+                    tests=["alpha.smt2", "nested/beta.smt"],
+                    target_binary=python_binary,
+                    reference_binary=python_binary,
+                    num_workers=1,
+                    iterations=1,
+                    modulo=1,
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(captured["tests_root"], str((solver_root / "FUZZING_SEEDS").resolve()))
+            self.assertEqual(captured["tests"], ["alpha.smt2", "nested/beta.smt"])
+            self.assertTrue((solver_root / "FUZZING_SEEDS" / "alpha.smt2").exists())
+            self.assertTrue((solver_root / "FUZZING_SEEDS" / "nested" / "beta.smt").exists())
+
     def test_doctor_can_run_lightweight_script_checks_in_fake_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

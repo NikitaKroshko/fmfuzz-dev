@@ -1090,12 +1090,19 @@ class SolverFuzzingBrain:
     ) -> int:
         from scripts.commit_harness_runner import run_commit_harness
 
-        resolved_tests_root = Path(tests_root).resolve() if tests_root else self.resolve_test_root()
         targets = self.render_target_commands(
             mode=mode,
             target_binary=target_binary,
             reference_binary=reference_binary,
         )
+        if tests_root is not None:
+            resolved_tests_root = Path(tests_root).resolve()
+        elif self.contract.tests_command:
+            # The workflow only transfers test names between jobs, so contract-first
+            # harness runs must materialize FUZZING_SEEDS in the local workspace first.
+            resolved_tests_root, _ = self.prepare_seeds()
+        else:
+            resolved_tests_root = self.resolve_test_root()
         return run_commit_harness(
             tests=tests,
             tests_root=str(resolved_tests_root),
