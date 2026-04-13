@@ -1047,6 +1047,13 @@ class SolverFuzzingBrainTests(unittest.TestCase):
             z3_tests_root.mkdir(parents=True)
             (z3_tests_root / "a.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (z3_tests_root / "b.smt").write_text("(check-sat)\n", encoding="utf-8")
+            (z3_tests_root / "bitvec.smt2").write_text(
+                "(set-logic QF_BV)\n"
+                "(declare-const x (_ BitVec 8))\n"
+                "(assert (bvule x #x55))\n"
+                "(check-sat)\n",
+                encoding="utf-8",
+            )
 
             z3_brain = SolverFuzzingBrain(
                 repo_root / "contracts" / "solvers" / "z3.yml",

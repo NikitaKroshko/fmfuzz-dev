@@ -21,7 +21,22 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-OPENSMT_STABLE_LOGIC_PREFIXES = ("QF_L", "QF_N", "QF_S", "QF_IDL", "QF_RDL")
+TYPEFUZZ_STABLE_LOGIC_PREFIXES = ("QF_L", "QF_N", "QF_S", "QF_IDL", "QF_RDL")
+OPENSMT_STABLE_LOGIC_PREFIXES = TYPEFUZZ_STABLE_LOGIC_PREFIXES
+_SET_LOGIC_RE = re.compile(r"\(\s*set-logic\s+([^\s)]+)", re.IGNORECASE)
+_Z3_UNSTABLE_CONTENT_RE = re.compile(
+    r"(?is)"
+    r"\(_\s*BitVec\b|"
+    r"\bbv[a-z0-9_]+\b|"
+    r"#x[0-9a-f]+\b|"
+    r"#b[01]+\b|"
+    r"\bdeclare-datatypes(?:-rec)?\b|"
+    r"\bArray\b|"
+    r"\bselect\b|"
+    r"\bstore\b|"
+    r"\bFloatingPoint\b|"
+    r"\bfp\.",
+)
 
 
 def _extract_opensmt_logic_name(relative_name: str) -> str:
@@ -46,6 +61,33 @@ def is_opensmt_preferred_test(relative_name: str) -> bool:
         return True
 
     return logic_name.startswith(OPENSMT_STABLE_LOGIC_PREFIXES)
+
+
+def _read_text_safely(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def is_z3_typefuzz_compatible_test(test_file: Path) -> bool:
+    """Return True when a Z3 seed is likely compatible with TypeFuzz.
+
+    TypeFuzz's stable path is strongest on string and arithmetic logics.
+    We keep seeds that either declare one of those stable logics or do not
+    contain obvious unsupported theory constructs such as bitvectors, arrays,
+    datatypes, or floating-point operators.
+    """
+    content = _read_text_safely(test_file)
+    if content is None:
+        return False
+
+    logic_match = _SET_LOGIC_RE.search(content)
+    if logic_match:
+        logic_name = logic_match.group(1).upper()
+        return logic_name.startswith(TYPEFUZZ_STABLE_LOGIC_PREFIXES)
+
+    return _Z3_UNSTABLE_CONTENT_RE.search(content) is None
 
 
 def _interleave_grouped_tests(grouped_tests: dict[str, list[str]]) -> List[str]:
@@ -79,21 +121,26 @@ def check_has_unsupported_commands(test_file: Path) -> bool:
 
 
 def discover_z3_tests(z3test_dir: str) -> List[str]:
-    from scripts.z3.coverage.coverage_mapper import CoverageMapper
-
     z3test_path = Path(z3test_dir)
-    mapper = CoverageMapper(z3test_dir=str(z3test_path))
-    tests = [name for _, name in mapper.get_smt2_tests()]
-
     filtered: List[str] = []
-    skip_tests = {"regressions/smt2/5731.smt2"}
-    for test_name in tests:
-        if test_name in skip_tests:
+    regressions_root = z3test_path / "regressions"
+    search_root = regressions_root if regressions_root.exists() else z3test_path
+
+    for test_file in sorted(search_root.rglob("*")):
+        if not test_file.is_file():
             continue
-        test_file = z3test_path / test_name
-        if test_file.exists() and check_has_unsupported_commands(test_file):
+        if test_file.name.endswith(".disabled"):
             continue
-        filtered.append(test_name)
+        if test_file.suffix.lower() not in {".smt", ".smt2"}:
+            continue
+        relative_name = test_file.relative_to(z3test_path).as_posix()
+        if relative_name == "regressions/smt2/5731.smt2":
+            continue
+        if check_has_unsupported_commands(test_file):
+            continue
+        if not is_z3_typefuzz_compatible_test(test_file):
+            continue
+        filtered.append(relative_name)
     return filtered
 
 

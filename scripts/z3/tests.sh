@@ -32,39 +32,15 @@ mkdir -p "$SEEDS_ROOT"
 PYTHONPATH="${BRAIN_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
 python3 - "$TESTS_ROOT" "$SEEDS_ROOT" <<'PY'
 import shutil
-import re
 import sys
 from pathlib import Path
+
+from scripts.local_commit_fuzzer_matrix import discover_z3_tests
 
 source_root = Path(sys.argv[1])
 seeds_root = Path(sys.argv[2])
 
-regressions_root = source_root / "regressions"
-if regressions_root.exists():
-    search_root = regressions_root
-else:
-    search_root = source_root
-
-tests = []
-for source in sorted(search_root.rglob("*")):
-    if not source.is_file():
-        continue
-    if source.name.endswith(".disabled"):
-        continue
-    if source.suffix.lower() not in {".smt", ".smt2"}:
-        continue
-    try:
-        content = source.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        continue
-    except Exception as exc:
-        raise SystemExit(f"failed to read z3 test source {source}: {exc}") from exc
-    if re.search(r"\(check-sat-using\b", content, re.IGNORECASE):
-        continue
-    relative_name = source.relative_to(source_root).as_posix()
-    if relative_name == "regressions/smt2/5731.smt2":
-        continue
-    tests.append(relative_name)
+tests = discover_z3_tests(str(source_root))
 
 for relative_name in tests:
     source = source_root / relative_name
