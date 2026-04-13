@@ -642,16 +642,18 @@ index 1111111..2222222 100644
                 ["a.smt2", "nested/b.smt"],
             )
 
-    def test_discover_opensmt_tests_prioritizes_supported_array_families(self) -> None:
+    def test_discover_opensmt_tests_prioritizes_stable_arithmetic_families(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "opensmt"
             seeds_root = repo_root / "test" / "regression"
-            (seeds_root / "base" / "QF_AUFLIRA").mkdir(parents=True)
+            (seeds_root / "base" / "QF_LIA").mkdir(parents=True)
+            (seeds_root / "base" / "QF_NIA").mkdir(parents=True)
             (seeds_root / "base" / "QF_AX").mkdir(parents=True)
             (seeds_root / "base" / "QF_BV").mkdir(parents=True)
             (seeds_root / "misc").mkdir(parents=True)
 
-            (seeds_root / "base" / "QF_AUFLIRA" / "mixed.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            (seeds_root / "base" / "QF_LIA" / "linear.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            (seeds_root / "base" / "QF_NIA" / "nonlinear.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (seeds_root / "base" / "QF_AX" / "array.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (seeds_root / "base" / "QF_BV" / "bv.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (seeds_root / "misc" / "plain.smt2").write_text("(check-sat)\n", encoding="utf-8")
@@ -659,10 +661,9 @@ index 1111111..2222222 100644
             self.assertEqual(
                 discover_opensmt_tests(str(repo_root)),
                 [
-                    "base/QF_AUFLIRA/mixed.smt2",
-                    "base/QF_AX/array.smt2",
+                    "base/QF_LIA/linear.smt2",
+                    "base/QF_NIA/nonlinear.smt2",
                     "misc/plain.smt2",
-                    "base/QF_BV/bv.smt2",
                 ],
             )
 

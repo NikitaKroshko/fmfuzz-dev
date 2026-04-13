@@ -57,12 +57,14 @@ class OpenSMTCoverageTests(unittest.TestCase):
             repo_root = Path(tmp) / "opensmt"
             seeds_root = repo_root / "test" / "regression"
 
-            (seeds_root / "base" / "QF_AUFLIRA").mkdir(parents=True)
+            (seeds_root / "base" / "QF_LIA").mkdir(parents=True)
+            (seeds_root / "base" / "QF_NIA").mkdir(parents=True)
             (seeds_root / "base" / "QF_AX").mkdir(parents=True)
             (seeds_root / "base" / "QF_BV").mkdir(parents=True)
             (seeds_root / "misc").mkdir(parents=True)
 
-            (seeds_root / "base" / "QF_AUFLIRA" / "mixed.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            (seeds_root / "base" / "QF_LIA" / "linear.smt2").write_text("(check-sat)\n", encoding="utf-8")
+            (seeds_root / "base" / "QF_NIA" / "nonlinear.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (seeds_root / "base" / "QF_AX" / "array.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (seeds_root / "base" / "QF_BV" / "bv.smt2").write_text("(check-sat)\n", encoding="utf-8")
             (seeds_root / "misc" / "plain.smt2").write_text("(check-sat)\n", encoding="utf-8")
@@ -70,10 +72,9 @@ class OpenSMTCoverageTests(unittest.TestCase):
             self.assertEqual(
                 discover_opensmt_tests(str(repo_root)),
                 [
-                    "base/QF_AUFLIRA/mixed.smt2",
-                    "base/QF_AX/array.smt2",
+                    "base/QF_LIA/linear.smt2",
+                    "base/QF_NIA/nonlinear.smt2",
                     "misc/plain.smt2",
-                    "base/QF_BV/bv.smt2",
                 ],
             )
 
@@ -82,15 +83,14 @@ class OpenSMTCoverageTests(unittest.TestCase):
                 workspace_root=Path(tmp),
             )
             matrix = brain.build_coverage_matrix()
-            self.assertEqual(matrix["total_tests"], 4)
-            self.assertEqual(matrix["total_jobs"], 4)
+            self.assertEqual(matrix["total_tests"], 3)
+            self.assertEqual(matrix["total_jobs"], 3)
             self.assertEqual(
                 matrix["matrix"]["include"],
                 [
                     {"job_name": "opensmt-coverage-1", "start_index": 1, "end_index": 1},
                     {"job_name": "opensmt-coverage-2", "start_index": 2, "end_index": 2},
                     {"job_name": "opensmt-coverage-3", "start_index": 3, "end_index": 3},
-                    {"job_name": "opensmt-coverage-4", "start_index": 4, "end_index": 4},
                 ],
             )
 

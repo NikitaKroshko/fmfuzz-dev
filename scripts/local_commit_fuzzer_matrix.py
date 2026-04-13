@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-OPENSMT_UNSUPPORTED_LOGIC_MARKERS = ("BV", "FP", "NIA", "NRA", "PB")
+OPENSMT_STABLE_LOGIC_PREFIXES = ("QF_L", "QF_N", "QF_S", "QF_IDL", "QF_RDL")
 
 
 def _extract_opensmt_logic_name(relative_name: str) -> str:
@@ -34,20 +34,18 @@ def _extract_opensmt_logic_name(relative_name: str) -> str:
 
 
 def is_opensmt_preferred_test(relative_name: str) -> bool:
-    """Return True for OpenSMT-supported tests we want to schedule first.
+    """Return True for OpenSMT tests compatible with TypeFuzz's stable path.
 
-    Keep the supported quantifier-free array/UF/linear-arithmetic families in
-    the main sample and only push obviously unsupported bitvector, floating
-    point, string, pseudo-boolean, or nonlinear families to the fallback set.
+    yinyang's TypeFuzz docs note stable support for arithmetic and string
+    logics, while other logics are experimental. Keep only those families in
+    the commit-fuzzer corpus so the worker loop does not repeatedly trip the
+    typechecker on array/bitvector/floating-point/pseudo-boolean seeds.
     """
     logic_name = _extract_opensmt_logic_name(relative_name)
     if not logic_name:
         return True
 
-    if logic_name.startswith("QF_S"):
-        return False
-
-    return not any(marker in logic_name for marker in OPENSMT_UNSUPPORTED_LOGIC_MARKERS)
+    return logic_name.startswith(OPENSMT_STABLE_LOGIC_PREFIXES)
 
 
 def _interleave_grouped_tests(grouped_tests: dict[str, list[str]]) -> List[str]:
@@ -113,7 +111,6 @@ def discover_opensmt_tests(opensmt_dir: str) -> List[str]:
         return []
 
     preferred_groups: dict[str, list[str]] = {}
-    fallback_groups: dict[str, list[str]] = {}
 
     for test_file in sorted(seed_root.rglob("*")):
         if not test_file.is_file():
@@ -126,14 +123,11 @@ def discover_opensmt_tests(opensmt_dir: str) -> List[str]:
 
         parts = Path(relative_name).parts
         family = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
-        # Keep obviously unsupported families in a fallback bucket so they do
-        # not crowd out the supported OpenSMT corpus when tests are limited.
-        target_groups = preferred_groups if is_opensmt_preferred_test(relative_name) else fallback_groups
-        target_groups.setdefault(family, []).append(relative_name)
+        if not is_opensmt_preferred_test(relative_name):
+            continue
+        preferred_groups.setdefault(family, []).append(relative_name)
 
-    ordered_tests = _interleave_grouped_tests(preferred_groups)
-    ordered_tests.extend(_interleave_grouped_tests(fallback_groups))
-    return ordered_tests
+    return _interleave_grouped_tests(preferred_groups)
 
 
 def maybe_limit_tests(tests: Sequence[str], limit_tests: int | None) -> List[str]:
