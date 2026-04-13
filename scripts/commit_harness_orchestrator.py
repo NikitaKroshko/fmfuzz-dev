@@ -1019,11 +1019,13 @@ class CommitHarnessRunner:
                     (
                         f"[WORKER {worker_id}] Running harness on: "
                         f"{test_name} (timeout: {per_test_timeout}s)"
-                    )
+                    ),
+                    flush=True,
                 )
             else:
                 print(
-                    f"[WORKER {worker_id}] Running harness on: {test_name}"
+                    f"[WORKER {worker_id}] Running harness on: {test_name}",
+                    flush=True,
                 )
 
             start_time = time.time()
@@ -1031,11 +1033,11 @@ class CommitHarnessRunner:
             try:
                 if per_test_timeout and per_test_timeout > 0:
                     result = subprocess.run(
-                        cmd, capture_output=True, text=True,
+                        cmd, text=True,
                         timeout=per_test_timeout)
                 else:
                     result = subprocess.run(
-                        cmd, capture_output=True, text=True)
+                        cmd, text=True)
 
                 exit_code = result.returncode
             except subprocess.TimeoutExpired:
@@ -1097,7 +1099,9 @@ class CommitHarnessRunner:
             if bug_files:
                 print(
                     f"[WORKER {worker_id}] ✓ Exit code 10: Found {
-                        len(bug_files)} bug(s) on {test_name}")
+                        len(bug_files)} bug(s) on {test_name}",
+                    flush=True,
+                )
                 self._persist_bug_files(worker_id, bug_files)
             else:
                 print(
@@ -1114,7 +1118,8 @@ class CommitHarnessRunner:
                 (
                     f"[WORKER {worker_id}] ⚠ Exit code 3: {test_name} "
                     "(unsupported operation - removing)"
-                )
+                ),
+                flush=True,
             )
             self.stats['tests_removed_unsupported'] += 1
             return 'remove'
@@ -1126,7 +1131,8 @@ class CommitHarnessRunner:
                         f"[WORKER {worker_id}] Exit code 0: No bugs found on "
                         f"{test_name} (runtime: {runtime:.1f}s) - requeuing "
                         "for next cycle"
-                    )
+                    ),
+                    flush=True,
                 )
                 # Always requeue to create ring/queue behavior - tests cycle
                 # continuously until time expires
@@ -1134,7 +1140,9 @@ class CommitHarnessRunner:
             else:
                 print(
                     f"[WORKER {worker_id}] Exit code 0: {test_name} (runtime: {
-                        runtime:.1f}s) - bugs found, requeuing")
+                        runtime:.1f}s) - bugs found, requeuing",
+                    flush=True,
+                )
                 return 'requeue'
 
         else:
@@ -1142,7 +1150,7 @@ class CommitHarnessRunner:
 
     def _worker_process(self, worker_id: int):
         """Run the worker loop for dequeuing tests and executing harnesses."""
-        print(f"[WORKER {worker_id}] Started")
+        print(f"[WORKER {worker_id}] Started", flush=True)
 
         while not self.shutdown_event.is_set():
             try:
@@ -1154,6 +1162,7 @@ class CommitHarnessRunner:
                             f"{resource_status} resource usage"
                         ),
                         file=sys.stderr,
+                        flush=True,
                     )
                     time.sleep(self.RESOURCE_CONFIG['pause_duration'])
                     continue
@@ -1208,10 +1217,12 @@ class CommitHarnessRunner:
             except Exception as e:
                 print(
                     f"[WORKER {worker_id}] Error in worker: {e}",
-                    file=sys.stderr)
+                    file=sys.stderr,
+                    flush=True,
+                )
                 continue
 
-        print(f"[WORKER {worker_id}] Stopped")
+        print(f"[WORKER {worker_id}] Stopped", flush=True)
 
     def _run_serial(self) -> int:
         """Run the harness loop without multiprocessing.Manager support."""
@@ -1262,7 +1273,9 @@ class CommitHarnessRunner:
             print(
                 f"No tests provided{
                     ' for job ' +
-                    self.job_id if self.job_id else ''}")
+                    self.job_id if self.job_id else ''}",
+                flush=True,
+            )
             return 0
 
         print(
@@ -1270,25 +1283,31 @@ class CommitHarnessRunner:
                 len(
                     self.tests)} test(s){
                 ' for job ' +
-                self.job_id if self.job_id else ''}")
-        print(f"Tests root: {self.tests_root}")
+                self.job_id if self.job_id else ''}",
+            flush=True,
+        )
+        print(f"Tests root: {self.tests_root}", flush=True)
         print(
             f"Timeout: {
                 self.time_remaining}s ({
                 self.time_remaining //
-                60} minutes)" if self.time_remaining else "No timeout")
-        print(f"Iterations per test: {self.iterations}")
-        print(f"Modulo: {self.modulo}")
-        print(f"CPU cores: {self.cpu_count}")
-        print(f"Workers: {self.num_workers}")
-        print(f"Strict mode: {self.strict_mode}")
+                60} minutes)" if self.time_remaining else "No timeout",
+            flush=True,
+        )
+        print(f"Iterations per test: {self.iterations}", flush=True)
+        print(f"Modulo: {self.modulo}", flush=True)
+        print(f"CPU cores: {self.cpu_count}", flush=True)
+        print(f"Workers: {self.num_workers}", flush=True)
+        print(f"Strict mode: {self.strict_mode}", flush=True)
         print(
             "Targets: " +
             (", ".join(
                 shlex.join(command) for command in self.target_commands)
-             if self.target_commands else "(none)"))
-        print(f"Harness template: {self.harness_template}")
-        print()
+             if self.target_commands else "(none)"),
+            flush=True,
+        )
+        print(f"Harness template: {self.harness_template}", flush=True)
+        print(flush=True)
 
         if self.single_process_mode:
             return self._run_serial()
@@ -1308,10 +1327,10 @@ class CommitHarnessRunner:
         monitor_thread = threading.Thread(
             target=self._monitor_resources, daemon=True)
         monitor_thread.start()
-        print("[DEBUG] Resource monitoring started")
+        print("[DEBUG] Resource monitoring started", flush=True)
 
         def signal_handler(signum, frame):
-            print("\n⏰ Shutdown signal received, stopping workers...")
+            print("\n⏰ Shutdown signal received, stopping workers...", flush=True)
             self.shutdown_event.set()
 
         signal.signal(signal.SIGTERM, signal_handler)
@@ -1324,13 +1343,13 @@ class CommitHarnessRunner:
                                                      for w in workers):
                     time.sleep(1)
                 if time.time() >= end_time:
-                    print("⏰ Timeout reached, stopping workers...")
+                    print("⏰ Timeout reached, stopping workers...", flush=True)
                     self.shutdown_event.set()
             else:
                 for worker in workers:
                     worker.join()
         except KeyboardInterrupt:
-            print("\n⏰ Interrupted, stopping workers...")
+            print("\n⏰ Interrupted, stopping workers...", flush=True)
             self.shutdown_event.set()
 
         for worker in workers:
@@ -1341,7 +1360,8 @@ class CommitHarnessRunner:
                     (
                         f"Warning: Worker {worker_pid} did not terminate, "
                         "killing..."
-                    )
+                    ),
+                    flush=True,
                 )
                 worker.terminate()
                 worker.join(timeout=2)
