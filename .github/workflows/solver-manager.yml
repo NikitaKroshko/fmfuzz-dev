@@ -1,0 +1,73 @@
+name: Solver Manager
+
+on:
+  workflow_call:
+    inputs:
+      solver_name:
+        required: true
+        type: string
+      contract_path:
+        required: true
+        type: string
+      commit_hash:
+        required: false
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
+
+jobs:
+  manager:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install boto3 GitPython requests
+
+      - name: Read contract
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            describe \
+            --json > contract.json
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Run manager
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO_URL=$(python3 -c "import json; print(json.load(open('contract.json'))['repository_url'])")
+          if [ -n "${{ inputs.commit_hash }}" ]; then
+            COMMIT_HASH="${{ inputs.commit_hash }}"
+            if python3 scripts/scheduling/detect_cpp_changes.py "$REPO_URL" "$COMMIT_HASH" --token "$GITHUB_TOKEN"; then
+              python3 scripts/scheduling/s3_state.py "${{ inputs.solver_name }}" build-queue add "$COMMIT_HASH"
+              python3 scripts/scheduling/s3_state.py "${{ inputs.solver_name }}" fuzzing-schedule add "$COMMIT_HASH"
+              echo "✅ Added $COMMIT_HASH to build queue and fuzzing schedule"
+            else
+              echo "❌ Commit $COMMIT_HASH has no C++ changes"
+              exit 1
+            fi
+          else
+            python3 scripts/scheduling/manager.py "${{ inputs.solver_name }}" "$REPO_URL" --token "$GITHUB_TOKEN"
+          fi

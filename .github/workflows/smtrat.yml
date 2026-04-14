@@ -29,16 +29,22 @@ jobs:
           echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
           echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
       
+      - name: Build SMT-RAT
+        if: steps.check-upstream.outputs.build_needed == 'true'
+        run: ./scripts/smtrat/build.sh
+
+      - name: Persist built SHA
+        if: steps.check-upstream.outputs.build_needed == 'true'
+        run: |
+          mkdir -p .cache
+          printf '%s\n' "${{ steps.check-upstream.outputs.sha }}" > .cache/smtrat_last_sha
+
       - name: Save solver state cache
         if: steps.check-upstream.outputs.build_needed == 'true'
         uses: actions/cache@v4
         with:
           path: .cache
           key: solver-smtrat-${{ steps.check-upstream.outputs.sha }}
-      
-      - name: Build SMT-RAT
-        if: steps.check-upstream.outputs.build_needed == 'true'
-        run: ./scripts/smtrat/build.sh
       
       - name: Skip build (up to date)
         if: steps.check-upstream.outputs.build_needed == 'false'

@@ -58,22 +58,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Prepare OpenSMT for commit
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Prepare OpenSMT workspace for commit
         run: |
           COMMIT_HASH="${{ matrix.commit }}"
           echo "🔨 Building commit: $COMMIT_HASH"
-          if [ -d "opensmt" ]; then
-            rm -rf opensmt
-          fi
-          git clone https://github.com/usi-verification-and-security/OpenSMT.git opensmt
-          cd opensmt
-          git checkout "$COMMIT_HASH"
-          echo "Checked out commit: $(git rev-parse HEAD)"
-          cd ..
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            checkout \
+            --commit-hash "$COMMIT_HASH" \
+            --json > checkout.json
+          echo "Checked out commit: $(jq -r '.solver_commit_hash' checkout.json)"
 
       - name: Build OpenSMT production binary
         run: |
-          bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            build \
+            --mode production \
+            --build-arg=--static \
+            --artifacts-dir .artifacts-production \
+            --artifact-archive artifacts-production.tar.gz \
+            --json > production-build.json
 
       - name: Get commit hash
         id: get-commit
@@ -83,29 +106,16 @@ jobs:
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           echo "OpenSMT commit hash: $COMMIT_HASH"
 
-      - name: Collect production artifacts
-        run: |
-          bash "${{ github.workspace }}/scripts/opensmt/collect_build_artifacts.sh" opensmt/build .artifacts-production
-
-      - name: Compress production artifacts
-        run: |
-          cd .artifacts-production
-          tar -czf ../artifacts-production.tar.gz .
-          cd ..
-
       - name: Build OpenSMT coverage binary
         run: |
-          bash "${{ github.workspace }}/scripts/opensmt/build.sh" --static --coverage
-
-      - name: Collect coverage artifacts
-        run: |
-          bash "${{ github.workspace }}/scripts/opensmt/collect_build_artifacts.sh" opensmt/build .artifacts-coverage
-
-      - name: Compress coverage artifacts
-        run: |
-          cd .artifacts-coverage
-          tar -czf ../artifacts-coverage.tar.gz .
-          cd ..
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            build \
+            --mode instrumentation \
+            --build-arg=--static \
+            --artifacts-dir .artifacts-coverage \
+            --artifact-archive artifacts-coverage.tar.gz \
+            --json > coverage-build.json
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0

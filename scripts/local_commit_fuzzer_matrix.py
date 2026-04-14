@@ -21,7 +21,22 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-OPENSMT_UNSUPPORTED_LOGIC_MARKERS = ("BV", "FP", "NIA", "NRA", "PB")
+TYPEFUZZ_STABLE_LOGIC_PREFIXES = ("QF_L", "QF_N", "QF_S", "QF_IDL", "QF_RDL")
+OPENSMT_STABLE_LOGIC_PREFIXES = TYPEFUZZ_STABLE_LOGIC_PREFIXES
+_SET_LOGIC_RE = re.compile(r"\(\s*set-logic\s+([^\s)]+)", re.IGNORECASE)
+_Z3_UNSTABLE_CONTENT_RE = re.compile(
+    r"(?is)"
+    r"\(_\s*BitVec\b|"
+    r"\bbv[a-z0-9_]+\b|"
+    r"#x[0-9a-f]+\b|"
+    r"#b[01]+\b|"
+    r"\bdeclare-datatypes(?:-rec)?\b|"
+    r"\bArray\b|"
+    r"\bselect\b|"
+    r"\bstore\b|"
+    r"\bFloatingPoint\b|"
+    r"\bfp\.",
+)
 
 
 def _extract_opensmt_logic_name(relative_name: str) -> str:
@@ -34,20 +49,45 @@ def _extract_opensmt_logic_name(relative_name: str) -> str:
 
 
 def is_opensmt_preferred_test(relative_name: str) -> bool:
-    """Return True for OpenSMT-supported tests we want to schedule first.
+    """Return True for OpenSMT tests compatible with TypeFuzz's stable path.
 
-    Keep the supported quantifier-free array/UF/linear-arithmetic families in
-    the main sample and only push obviously unsupported bitvector, floating
-    point, string, pseudo-boolean, or nonlinear families to the fallback set.
+    yinyang's TypeFuzz docs note stable support for arithmetic and string
+    logics, while other logics are experimental. Keep only those families in
+    the commit-fuzzer corpus so the worker loop does not repeatedly trip the
+    typechecker on array/bitvector/floating-point/pseudo-boolean seeds.
     """
     logic_name = _extract_opensmt_logic_name(relative_name)
     if not logic_name:
         return True
 
-    if logic_name.startswith("QF_S"):
+    return logic_name.startswith(OPENSMT_STABLE_LOGIC_PREFIXES)
+
+
+def _read_text_safely(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def is_z3_typefuzz_compatible_test(test_file: Path) -> bool:
+    """Return True when a Z3 seed is likely compatible with TypeFuzz.
+
+    TypeFuzz's stable path is strongest on string and arithmetic logics.
+    We keep seeds that either declare one of those stable logics or do not
+    contain obvious unsupported theory constructs such as bitvectors, arrays,
+    datatypes, or floating-point operators.
+    """
+    content = _read_text_safely(test_file)
+    if content is None:
         return False
 
-    return not any(marker in logic_name for marker in OPENSMT_UNSUPPORTED_LOGIC_MARKERS)
+    logic_match = _SET_LOGIC_RE.search(content)
+    if logic_match:
+        logic_name = logic_match.group(1).upper()
+        return logic_name.startswith(TYPEFUZZ_STABLE_LOGIC_PREFIXES)
+
+    return _Z3_UNSTABLE_CONTENT_RE.search(content) is None
 
 
 def _interleave_grouped_tests(grouped_tests: dict[str, list[str]]) -> List[str]:
@@ -81,21 +121,26 @@ def check_has_unsupported_commands(test_file: Path) -> bool:
 
 
 def discover_z3_tests(z3test_dir: str) -> List[str]:
-    from scripts.z3.coverage.coverage_mapper import CoverageMapper
-
     z3test_path = Path(z3test_dir)
-    mapper = CoverageMapper(z3test_dir=str(z3test_path))
-    tests = [name for _, name in mapper.get_smt2_tests()]
-
     filtered: List[str] = []
-    skip_tests = {"regressions/smt2/5731.smt2"}
-    for test_name in tests:
-        if test_name in skip_tests:
+    regressions_root = z3test_path / "regressions"
+    search_root = regressions_root if regressions_root.exists() else z3test_path
+
+    for test_file in sorted(search_root.rglob("*")):
+        if not test_file.is_file():
             continue
-        test_file = z3test_path / test_name
-        if test_file.exists() and check_has_unsupported_commands(test_file):
+        if test_file.name.endswith(".disabled"):
             continue
-        filtered.append(test_name)
+        if test_file.suffix.lower() not in {".smt", ".smt2"}:
+            continue
+        relative_name = test_file.relative_to(z3test_path).as_posix()
+        if relative_name == "regressions/smt2/5731.smt2":
+            continue
+        if check_has_unsupported_commands(test_file):
+            continue
+        if not is_z3_typefuzz_compatible_test(test_file):
+            continue
+        filtered.append(relative_name)
     return filtered
 
 
@@ -113,7 +158,6 @@ def discover_opensmt_tests(opensmt_dir: str) -> List[str]:
         return []
 
     preferred_groups: dict[str, list[str]] = {}
-    fallback_groups: dict[str, list[str]] = {}
 
     for test_file in sorted(seed_root.rglob("*")):
         if not test_file.is_file():
@@ -126,14 +170,11 @@ def discover_opensmt_tests(opensmt_dir: str) -> List[str]:
 
         parts = Path(relative_name).parts
         family = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
-        # Keep obviously unsupported families in a fallback bucket so they do
-        # not crowd out the supported OpenSMT corpus when tests are limited.
-        target_groups = preferred_groups if is_opensmt_preferred_test(relative_name) else fallback_groups
-        target_groups.setdefault(family, []).append(relative_name)
+        if not is_opensmt_preferred_test(relative_name):
+            continue
+        preferred_groups.setdefault(family, []).append(relative_name)
 
-    ordered_tests = _interleave_grouped_tests(preferred_groups)
-    ordered_tests.extend(_interleave_grouped_tests(fallback_groups))
-    return ordered_tests
+    return _interleave_grouped_tests(preferred_groups)
 
 
 def maybe_limit_tests(tests: Sequence[str], limit_tests: int | None) -> List[str]:

@@ -26,6 +26,12 @@ from dataclasses import dataclass
 
 import clang.cindex
 
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.diff_utils import FileDiff, parse_unified_diff
+
 # Monkey-patch: expose template argument introspection via libclang C API if missing
 try:
     libname = find_library('clang')
@@ -98,41 +104,8 @@ class GitHelper:
             print(f"Error getting commit diff: {e}")
             return ""
 
-    def get_changed_lines(self, diff_text: str) -> Dict[str, Set[int]]:
-        changed_lines: Dict[str, Set[int]] = {}
-        current_file: Optional[str] = None
-        in_hunk = False
-        new_line = None
-        for raw in diff_text.split('\n'):
-            if raw.startswith('diff --git '):
-                current_file = None
-                in_hunk = False
-                new_line = None
-                continue
-            if raw.startswith('+++ b/'):
-                current_file = raw[6:]
-                if current_file not in changed_lines:
-                    changed_lines[current_file] = set()
-                continue
-            if raw.startswith('@@ '):
-                m = re.search(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', raw)
-                if current_file and m:
-                    new_line = int(m.group(1))
-                    in_hunk = True
-                else:
-                    in_hunk = False
-                    new_line = None
-                continue
-            if not in_hunk or current_file is None or new_line is None:
-                continue
-            if raw.startswith('+') and not raw.startswith('+++'):
-                changed_lines[current_file].add(new_line)
-                new_line += 1
-            elif raw.startswith('-') and not raw.startswith('---'):
-                pass
-            else:
-                new_line += 1
-        return changed_lines
+    def get_changed_files(self, diff_text: str) -> Dict[str, FileDiff]:
+        return parse_unified_diff(diff_text)
 
     def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
         if not rev:
@@ -518,9 +491,9 @@ class PrepareCommitAnalyzer:
         if not commit_info:
             return ([], [])
 
-        # Get diff and changed line ranges on the new side
+        # Get diff hunk ranges on both sides
         diff_text = self.git.get_commit_diff(commit_hash)
-        changed_files_lines = self.git.get_changed_lines(diff_text)
+        changed_files = self.git.get_changed_files(diff_text)
 
         # Parent commit (if any)
         try:
@@ -532,22 +505,24 @@ class PrepareCommitAnalyzer:
         changed_functions: List[str] = []
         files_with_no_functions: List[str] = []
 
-        for file_path, changed_lines in changed_files_lines.items():
+        for file_path, file_diff in changed_files.items():
             # Only consider project sources under src/ and C++ files
             if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
                 continue
 
-            after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
-            if after_src is None:
-                continue
-            before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
+            after_path = file_diff.new_path if file_diff.new_path != '/dev/null' else None
+            before_path = file_diff.old_path if file_diff.old_path != '/dev/null' else None
+
+            after_src = self.git.get_file_text_at_commit(commit_hash, after_path)
+            before_src = self.git.get_file_text_at_commit(parent_hash, before_path) if parent_hash else None
 
             # Parse functions from in-memory contents
-            after_funcs = self.parse_functions_from_text(file_path, after_src)
-            before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
+            after_funcs = self.parse_functions_from_text(after_path or file_path, after_src)
+            before_funcs = self.parse_functions_from_text(before_path or file_path, before_src) if before_src is not None else []
 
-            # Build indexes for before
+            # Build indexes for before/after
             before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
+            after_by_sig = {self.build_signature_key(f.signature): f for f in after_funcs}
 
             # Helper to normalize function body slice
             def normalized_body(src: str, f: FunctionInfo) -> str:
@@ -557,16 +532,25 @@ class PrepareCommitAnalyzer:
                 snippet = "\n".join(lines[s-1:e])
                 return self.normalize_code(snippet)
 
-            # Per changed line: select the innermost enclosing function (smallest extent)
+            # Prefer after-side functions for insert/replace hunks and fall back to
+            # before-side functions for delete-only hunks.
             selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
                 cvc5_funcs = [f for f in after_funcs if self.is_cvc5_function(f.signature)]
-                for ln in sorted(changed_lines):
-                    candidates = [f for f in cvc5_funcs if int(f.start) <= ln <= int(f.end)]
-                    if not candidates:
+                for func in cvc5_funcs:
+                    if file_diff.overlaps_after(int(func.start), int(func.end)):
+                        key = self.build_signature_key(func.signature)
+                        selected[key] = func
+
+            if before_funcs:
+                cvc5_before_funcs = [f for f in before_funcs if self.is_cvc5_function(f.signature)]
+                for func in cvc5_before_funcs:
+                    key = self.build_signature_key(func.signature)
+                    if key in selected:
                         continue
-                    # choose innermost by minimal extent length, then earliest start
-                    chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
+                    if not file_diff.overlaps_before(int(func.start), int(func.end)):
+                        continue
+                    chosen = func
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
 
@@ -578,15 +562,18 @@ class PrepareCommitAnalyzer:
             for sig_key, f in selected.items():
                 # Exclude pure move if existed before and bodies equal
                 is_move = False
-                if before_src is not None and sig_key in before_by_sig:
-                    bf = before_by_sig[sig_key]
-                    if normalized_body(before_src, bf) == normalized_body(after_src, f):
+                before_func = before_by_sig.get(sig_key)
+                after_func = after_by_sig.get(sig_key)
+                if before_src is not None and after_src is not None and before_func and after_func:
+                    if normalized_body(before_src, before_func) == normalized_body(after_src, after_func):
                         is_move = True
                 if is_move:
                     continue
-                mapping_entry = f"{file_path}:{f.signature}"
+                selected_path = after_path or before_path or file_path
+                mapping_entry = f"{selected_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
-                print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
+                source_side = "after" if sig_key in after_by_sig else "before"
+                print(f"    Selected: {mapping_entry} (source={source_side})")
 
         return (changed_functions, files_with_no_functions)
 

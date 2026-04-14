@@ -1,185 +1,47 @@
 name: CVC5 Commit Fuzzer
 
-env:
-  LOCAL_TEST_LIMIT: 16
-
 on:
   workflow_dispatch:
     inputs:
       cvc5_commit_hash:
-        description: 'Optional: CVC5 commit hash to fuzz (defaults to upstream HEAD)'
+        description: "Optional: CVC5 commit hash to fuzz"
         required: false
         type: string
-      stop_buffer_minutes:
-        description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
+      smoke_test_limit:
+        description: "Smoke test count for manual runs; set to 0 for S3-backed production fuzzing"
         required: false
-        type: number
-        default: 5
+        type: string
+        default: "16"
+      stop_buffer_minutes:
+        description: "Minutes before timeout to stop fuzzing"
+        required: false
+        type: string
+        default: "5"
   schedule:
-    - cron: '45 0,5,10,15,20 * * *'
+    - cron: "45 0,5,10,15,20 * * *"
 
 concurrency:
-  # Keep scheduled and manual runs from canceling each other.
   group: ${{ github.workflow }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
-  run-fuzzer:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
+  run-manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/solver-commit-fuzzer.yml
+    with:
+      solver_name: cvc5
+      contract_path: contracts/solvers/cvc5.yml
+      run_mode: smoke
+      commit_hash: "${{ inputs.cvc5_commit_hash }}"
+      smoke_test_limit: "${{ inputs.smoke_test_limit }}"
+      stop_buffer_minutes: "${{ inputs.stop_buffer_minutes }}"
+    secrets: inherit
 
-    steps:
-      - name: Record job start time
-        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
-
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            libc6-dev \
-            gcc \
-            g++ \
-            binutils \
-            libstdc++-14-dev \
-            libc++-dev \
-            libc++abi-dev \
-            jq \
-            zlib1g \
-            zlib1g-dev \
-            unzip
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-
-      - name: Install Python dependencies
-        run: |
-          pip install psutil antlr4-python3-runtime==4.9.2
-          git clone https://github.com/testsmt/yinyang.git
-          cd yinyang
-          pip install -e .
-          cd ..
-
-      - name: Clone CVC5 repository
-        run: |
-          if [ -d "cvc5" ]; then
-            echo "CVC5 directory already exists, skipping clone"
-          else
-            git clone https://github.com/cvc5/cvc5.git cvc5
-          fi
-
-      - name: Fetch CVC5 refs
-        working-directory: cvc5
-        run: git fetch --all --tags
-
-      - name: Checkout CVC5 commit
-        if: inputs.cvc5_commit_hash != ''
-        working-directory: cvc5
-        run: |
-          git checkout ${{ inputs.cvc5_commit_hash }}
-          echo "Checked out commit: $(git rev-parse HEAD)"
-
-      - name: Record CVC5 commit hash
-        id: get-commit
-        working-directory: cvc5
-        run: |
-          echo "commit_hash=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "CVC5 commit hash: $(git rev-parse HEAD)"
-
-      - name: Build CVC5 static binary
-        run: bash "${{ github.workspace }}/scripts/cvc5/build.sh" --static
-
-      - name: Clone Z3 repository
-        run: |
-          if [ -d "z3" ]; then
-            echo "Z3 directory already exists, skipping clone"
-          else
-            git clone https://github.com/Z3Prover/z3.git z3
-          fi
-
-      - name: Fetch Z3 refs
-        working-directory: z3
-        run: git fetch --all --tags
-
-      - name: Build Z3 static binary
-        run: |
-          bash "${{ github.workspace }}/scripts/z3/build.sh" --static
-          echo "${{ github.workspace }}/z3/build" >> "$GITHUB_PATH"
-
-      - name: Generate local test set
-        id: build-matrix
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python3 scripts/local_commit_fuzzer_matrix.py cvc5 \
-            --build-dir cvc5/build \
-            --limit-tests "${LOCAL_TEST_LIMIT}" \
-            --max-jobs 1 \
-            --output matrix.json
-
-          TEST_COUNT=$(jq -r '.total_tests' matrix.json)
-          if [ "$TEST_COUNT" = "0" ]; then
-            echo "No tests discovered"
-            echo "tests_json=[]" >> "$GITHUB_OUTPUT"
-            echo "test_count=0" >> "$GITHUB_OUTPUT"
-          else
-            TESTS_JSON=$(jq -c '.matrix.include[0].tests' matrix.json)
-            echo "tests_json=$TESTS_JSON" >> "$GITHUB_OUTPUT"
-            echo "test_count=$TEST_COUNT" >> "$GITHUB_OUTPUT"
-            echo "Selected $TEST_COUNT tests"
-          fi
-
-      - name: Run local commit fuzzer
-        if: steps.build-matrix.outputs.test_count != '0'
-        working-directory: cvc5
-        env:
-          TESTS_JSON: ${{ steps.build-matrix.outputs.tests_json }}
-        run: |
-          mkdir -p ../logs ../bugs
-          STOP_BUFFER="${{ inputs.stop_buffer_minutes || 5 }}"
-
-          set -o pipefail
-          "${{ github.workspace }}/scripts/cvc5/commit_fuzzer/simple_commit_fuzzer.py" \
-            --tests-json "$TESTS_JSON" \
-            --job-id 'cvc5-local' \
-            --tests-root 'test/regress/cli' \
-            --job-start-time "$JOB_START" \
-            --stop-buffer-minutes "$STOP_BUFFER" \
-            --iterations 250 \
-            --cvc5-path ./build/bin/cvc5 \
-            |& tee "../logs/cvc5-fuzzer.log"
-
-      - name: Upload local matrix
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-local-matrix
-          path: matrix.json
-          retention-days: 1
-
-      - name: Upload fuzzer log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-fuzzer-log
-          path: logs/cvc5-fuzzer.log
-          retention-days: 1
-          if-no-files-found: ignore
-
-      - name: Upload bugs artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-bugs
-          path: cvc5/bugs
-          retention-days: 1
-          if-no-files-found: ignore
+  run-scheduled:
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/solver-commit-fuzzer.yml
+    with:
+      solver_name: cvc5
+      contract_path: contracts/solvers/cvc5.yml
+      run_mode: production
+    secrets: inherit

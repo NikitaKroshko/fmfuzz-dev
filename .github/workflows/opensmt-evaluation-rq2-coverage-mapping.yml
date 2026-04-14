@@ -92,26 +92,19 @@ jobs:
           aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY artifacts/artifacts.tar.gz
           echo "✅ Downloaded coverage binary for $COMMIT_HASH"
 
-      - name: Clone OpenSMT repository
+      - name: Checkout OpenSMT workspace
         run: |
-          if [ -d "opensmt" ]; then
-            cd opensmt
-            git fetch origin
-          else
-            git clone https://github.com/usi-verification-and-security/OpenSMT.git opensmt
-            cd opensmt
-          fi
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            checkout \
+            --commit-hash "${{ matrix.commit }}" \
+            --json > checkout.json
 
-      - name: Checkout OpenSMT commit for coverage run
+      - name: Extract coverage artifact archive
         run: |
-          cd opensmt
-          git checkout ${{ matrix.commit }}
-          echo "Checked out commit: $(git rev-parse HEAD)"
-
-      - name: Extract coverage binary
-        run: |
-          mkdir -p opensmt/build
-          bash ./scripts/opensmt/extract_build_artifacts.sh artifacts/artifacts.tar.gz opensmt/build true
+          tar -xzf artifacts/artifacts.tar.gz -C opensmt
+          test -x opensmt/build/bin/opensmt
+          test -f opensmt/build/compile_commands.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -125,10 +118,13 @@ jobs:
       - name: Run coverage analysis
         run: |
           ${{ github.workspace }}/scripts/measure_time.sh \
-            bash \
-            ${{ github.workspace }}/scripts/opensmt/coverage/run_coverage_builder.sh \
-            ${{ matrix.chunk.start_index }} \
-            ${{ matrix.chunk.end_index }}
+            python3 \
+            ${{ github.workspace }}/scripts/solver_fuzzing_brain.py \
+            --contract ${{ github.workspace }}/contracts/solvers/opensmt.yml \
+            run-coverage-shard \
+            --start-index ${{ matrix.chunk.start_index }} \
+            --end-index ${{ matrix.chunk.end_index }} \
+            --output ${{ github.workspace }}/opensmt/build/coverage_mapping_${{ matrix.chunk.start_index }}_${{ matrix.chunk.end_index }}.json
 
       - name: Upload coverage mapping chunk
         uses: actions/upload-artifact@v4
@@ -158,7 +154,11 @@ jobs:
 
       - name: Join coverage mappings
         run: |
-          python3 scripts/opensmt/coverage/join_coverage_mappings.py
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            join-coverage \
+            --mappings-dir coverage-mappings \
+            --output coverage_mapping.json
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5.1.0

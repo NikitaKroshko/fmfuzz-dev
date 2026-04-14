@@ -1,39 +1,129 @@
 ### Commit Fuzzer
 
-### Components
-- GitHelper: commit metadata, `git show` diff, file blobs at commits.
-- PrepareCommitAnalyzer: identifies changed functions and resolves covering tests.
-- Matcher: looks up functions in the coverage map and returns tests.
+### Architecture
+- Shared logic lives in `scripts/solver_fuzzing_brain.py`.
+- Solver metadata lives in one YAML contract under `contracts/solvers/`.
+- Solver wrappers call reusable workflows and pass `solver_name` plus `contract_path`.
+- Solver-specific Python is only needed for domain-specific coverage parsing or changed-function analysis that the generic brain delegates to through contract commands.
 
-### Inputs
-- Commit SHA to analyze
-- Coverage map: `coverage_mapping.json(.gz)`
-- Build tree for parsing (e.g., `compile_commands.json`)
+### New Solver Contract
+The preferred user-facing contract is:
 
-### Outputs
-- For each commit: changed functions with test sets (and unmatched functions)
-- Aggregate stats across commits (totals and overall coverage)
+```yaml
+solver_name: demo
+repository_url: https://github.com/example/demo.git
+repository_path: demo
 
-### Algorithm
-1) Diff parsing (new-side line ranges)
-   - Run: `git show -U0 --no-color <sha>`.
-   - For each hunk header `@@ -<old>[,<n>] +<new>[,<m>] @@`:
-     - Initialize `new_line = <new>`.
-     - For each following line until next header:
-       - If line starts with `+` (and not `+++`), record `new_line` as changed; increment `new_line`.
-       - If context line (neither `+` nor `-`), increment `new_line`.
-     - Associate recorded new-side lines with the current `+++ b/<path>` file.
+build_script: build.sh
+production_binary_path: build/demo
+coverage_binary_path: build/demo-cov
 
-2) Function selection (AST overlap)
-   - For each changed C/C++ file:
-     - Parse with libclang (prefer arguments from `compile_commands.json`).
-     - Traverse functions/methods; keep only definitions.
-     - Select those whose source extent overlaps any changed line.
-     - If multiple functions cover a line, choose the innermost (smallest span).
-     - Move detection: for the same function (stable key = signature without `:line`) that exists in the parent commit, compare normalized bodies (strip comments, collapse whitespace) between parent and target extents; if identical, classify as a pure move and skip.
-     - Build function IDs as `path:demangled_signature:start_line` using `cursor.mangled_name` + `c++filt`.
+tests_script: tests.sh
+seeds_dir: FUZZING_SEEDS
 
-3) Coverage lookup
-   - Direct: exact `path:signature:line` match in coverage map.
-   - Pathless: drop `:line` (requires identical signature).
-   - If still unmatched, emit fuzzy candidates (do not count as covered).
+artifact_s3_prefix: solvers/demo/builds/v2
+
+target_commands:
+  - "{target_binary}"
+
+coverage_mapper_command: python3 tools/coverage_mapper.py --build-dir {build_dir}
+commit_prepare_command: python3 tools/prepare_commit.py
+
+environment_requirements:
+  packages:
+    - cmake
+    - python3
+  env:
+    - GCOV_PREFIX
+artifact_paths:
+  - build/demo
+  - build/compile_commands.json
+```
+
+Compatibility fields still load:
+- `build_command` and `coverage_build_command`
+- `test_discovery_command` and `test_root`
+- `tests_repository_url` and `tests_repository_path`
+- `production_binary_path`, `coverage_binary_path`, or aliases `binary_path` and `instrumented_binary_path`
+
+If `build_script` is present and `coverage_build_command` is omitted, the brain runs `build_script --instrumented` for coverage builds.
+
+Reference solver fields are optional. Use `reference_setup_command` plus `reference_binary_path` when the reference can be downloaded or prepared directly. Use `reference_contract_path` when the reference is another solver contract; unprefixed paths are resolved from the fmfuzz repository root, so `contracts/solvers/z3.yml` works from any solver contract. Use `contract:z3.yml` only for a path relative to the current contract file.
+
+### Script Contracts
+`build.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=production
+case "${1:-}" in
+  "" ) ;;
+  --instrumented|--instrumentation|--coverage ) mode=coverage ;;
+  * ) echo "unknown option: $1" >&2; exit 2 ;;
+esac
+
+# Build the solver here.
+binary="$PWD/build/demo"
+if [ "$mode" = coverage ]; then
+  binary="$PWD/build/demo-cov"
+fi
+
+printf 'BINARY_PATH=%s\n' "$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")"
+```
+
+`tests.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+seed_dir="${FUZZING_SEEDS:-$PWD/FUZZING_SEEDS}"
+mkdir -p "$seed_dir"
+
+# Copy or link stable SMT-LIB seeds. The directory may contain subdirectories.
+cp tests/regress/*.smt2 "$seed_dir"/
+```
+
+`FUZZING_SEEDS` semantics:
+- The tests script must leave a directory or stable symlink at `$FUZZING_SEEDS`.
+- Only `.smt` and `.smt2` files are scheduled by the generic seed path.
+- Test names are relative to `FUZZING_SEEDS`.
+- Legacy `test_discovery_command` and `test_root` remain compatibility fallbacks.
+
+### Validation
+Run this before wiring a new workflow:
+
+```bash
+python3 scripts/solver_fuzzing_brain.py --contract contracts/solvers/demo.yml validate --json
+```
+
+For fake-workspace script checks:
+
+```bash
+python3 scripts/solver_fuzzing_brain.py \
+  --contract contracts/solvers/demo.yml \
+  validate \
+  --run-script-checks \
+  --script-check-workspace /tmp/fmfuzz-demo-check \
+  --json
+```
+
+Validation errors use `BrainError` or `ContractError` formatting with solver, step, command, hint, repository URL, and issue tracker when available.
+
+### Production Flow
+Scheduled commit fuzzing uses `.github/workflows/solver-commit-fuzzer.yml`:
+1. `scripts/scheduling/fuzzer.py <solver> select --json` selects `(commit_to_fuzz, latest_build)` from S3 state.
+2. The workflow checks out the repository at `latest_build`.
+3. It resolves the production build and coverage mapping S3 prefixes from the contract and downloads the artifacts for `latest_build`.
+4. It calls `prepare-commit` through the contract to create a commit-targeted matrix for `commit_to_fuzz`.
+5. It runs `run-harness` over the matrix.
+6. It calls `scripts/scheduling/fuzzer.py <solver> increment <commit>` after attempted fuzzing.
+
+The reusable workflow consumes the brain-resolved `build_artifact_s3_prefix` and `coverage_mapping_s3_prefix` fields, so new solvers only need to keep their contract layout aligned.
+
+Manual smoke fuzzing is still available through the wrapper input `smoke_test_limit`. The production path does not use `LOCAL_TEST_LIMIT`.
+
+### Existing Solvers
+`cvc5`, `z3`, and `opensmt` are the reference contract-first examples. They now use `build_script`, `tests_script`, and `seeds_dir`, with the reusable workflows resolving the S3 layout from the contract instead of solver-specific string assembly.

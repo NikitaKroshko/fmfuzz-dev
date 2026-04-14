@@ -27,14 +27,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Clone CVC5 repository
+      - name: Read CVC5 contract
         run: |
-          if [ -d "cvc5" ]; then
-            cd cvc5
-            git fetch origin
-          else
-            git clone https://github.com/cvc5/cvc5.git cvc5
-          fi
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            describe \
+            --json > contract.json
+
+      - name: Checkout CVC5 workspace
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/cvc5.yml \
+            checkout \
+            --json > checkout.json
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,12 +65,14 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO_URL=$(jq -r '.repository_url' contract.json)
+          REPO_PATH=$(jq -r '.repository_path' contract.json)
           CMD="python3 scripts/evaluation/rq2/commit_selection.py \
             cvc5 \
-            https://github.com/cvc5/cvc5.git \
+            $REPO_URL \
             --years 2 \
             --token $GITHUB_TOKEN \
-            --repo-path cvc5"
+            --repo-path $REPO_PATH"
           
           if [ -n "${{ inputs.small_count }}" ] && [ "${{ inputs.small_count }}" != "" ]; then
             CMD="$CMD --small-count ${{ inputs.small_count }}"
@@ -82,4 +91,3 @@ jobs:
           fi
           
           eval $CMD
-

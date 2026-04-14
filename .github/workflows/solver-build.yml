@@ -1,0 +1,260 @@
+name: Solver Build
+
+on:
+  workflow_call:
+    inputs:
+      solver_name:
+        required: true
+        type: string
+      contract_path:
+        required: true
+        type: string
+      commit_hash:
+        required: false
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
+
+jobs:
+  check-build-queue:
+    runs-on: ubuntu-latest
+    outputs:
+      build_needed: ${{ steps.set-outputs.outputs.build_needed }}
+      sha: ${{ steps.set-outputs.outputs.sha }}
+      is_manual_build: ${{ steps.set-outputs.outputs.is_manual_build }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check build queue or add manual commit
+        id: set-outputs
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          if [ -n "${{ inputs.commit_hash }}" ]; then
+            COMMIT_HASH="${{ inputs.commit_hash }}"
+            echo "🔨 Adding provided commit to build queue: $COMMIT_HASH"
+            python3 scripts/scheduling/s3_state.py "${{ inputs.solver_name }}" build-queue add "$COMMIT_HASH"
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+            echo "is_manual_build=true" >> "$GITHUB_OUTPUT"
+          else
+            COMMIT_HASH=$(python3 scripts/scheduling/builder.py "${{ inputs.solver_name }}")
+            if [ -n "$COMMIT_HASH" ]; then
+              echo "build_needed=true" >> "$GITHUB_OUTPUT"
+              echo "sha=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+              echo "is_manual_build=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "build_needed=false" >> "$GITHUB_OUTPUT"
+              echo "sha=" >> "$GITHUB_OUTPUT"
+              echo "is_manual_build=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  build-artifacts:
+    needs: check-build-queue
+    if: needs.check-build-queue.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: production
+            s3_mode: production
+          - mode: instrumentation
+            s3_mode: coverage
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install base tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          pip install boto3
+
+      - name: Read contract
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            describe \
+            --json > contract.json
+
+      - name: Install contract system dependencies
+        run: |
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Checkout solver workspace
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            checkout \
+            --commit-hash "${{ needs.check-build-queue.outputs.sha }}" \
+            --json > checkout.json
+
+      - name: Validate contract after checkout
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            validate \
+            --json > contract-validation.json
+
+      - name: Build solver artifact bundle
+        run: |
+          mkdir -p "artifacts/${{ matrix.mode }}/bundle"
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            build \
+            --mode "${{ matrix.mode }}" \
+            --artifacts-dir "artifacts/${{ matrix.mode }}/bundle" \
+            --artifact-archive "artifacts/${{ matrix.mode }}/${{ needs.check-build-queue.outputs.sha }}.tar.gz" \
+            --json > "artifacts/${{ matrix.mode }}/build.json"
+
+      - name: Check if commit is still in build queue
+        id: check-queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          if ! CHECK_OUTPUT=$(python3 scripts/scheduling/check_build_queue.py "${{ inputs.solver_name }}" "$COMMIT_HASH" 2>check-queue.stderr); then
+            cat check-queue.stderr
+            exit 1
+          fi
+          if [ "$CHECK_OUTPUT" != "true" ] && [ "$CHECK_OUTPUT" != "false" ]; then
+            echo "❌ Unexpected build-queue response: $CHECK_OUTPUT"
+            cat check-queue.stderr
+            exit 1
+          fi
+          echo "should_upload=$CHECK_OUTPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact archive to S3
+        if: steps.check-queue.outputs.should_upload == 'true'
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            upload-artifact \
+            --source "artifacts/${{ matrix.mode }}/${{ needs.check-build-queue.outputs.sha }}.tar.gz" \
+            --s3-bucket "${{ secrets.AWS_S3_BUCKET }}" \
+            --s3-prefix "solvers/${{ inputs.solver_name }}/builds/v2/${{ matrix.s3_mode }}"
+
+      - name: Discard build (not in queue)
+        if: steps.check-queue.outputs.should_upload == 'false'
+        run: |
+          echo "⚠️  Commit ${{ needs.check-build-queue.outputs.sha }} was removed from queue, discarding ${{ matrix.mode }} build"
+
+  remove-from-queue:
+    needs: [check-build-queue, build-artifacts]
+    if: |
+      needs.build-artifacts.result == 'success' &&
+      needs.check-build-queue.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Remove commit from build queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          python3 scripts/scheduling/s3_state.py "${{ inputs.solver_name }}" build-queue remove "$COMMIT_HASH"
+          echo "✅ Removed $COMMIT_HASH from build queue (all artifacts uploaded)"
+
+  remove-from-queue-on-failure:
+    needs: [check-build-queue, build-artifacts]
+    if: |
+      always() &&
+      needs.check-build-queue.outputs.build_needed == 'true' &&
+      needs.build-artifacts.result == 'failure'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Remove failed commit from build queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
+          echo "❌ Build failed for commit $COMMIT_HASH, removing from queue to prevent infinite retries"
+          python3 scripts/scheduling/s3_state.py "${{ inputs.solver_name }}" build-queue remove "$COMMIT_HASH"
+          echo "✅ Removed failed commit $COMMIT_HASH from build queue"
+
+  skip-build:
+    needs: check-build-queue
+    if: needs.check-build-queue.outputs.build_needed == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip build (no commits in queue)
+        run: echo "✅ No commits in build queue - skipping build"

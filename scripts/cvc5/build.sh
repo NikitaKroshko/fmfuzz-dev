@@ -1,114 +1,81 @@
-#!/bin/bash
-# CVC5 Build and Test Script
-# This script clones, builds, and tests CVC5 following CI best practices
-# Usage: ./build.sh [--coverage] [--static]
-#   --coverage: Enable coverage instrumentation
-#   --static: Build static binary
-#   --static --coverage: Build static binary with coverage
+#!/usr/bin/env bash
 
-set -e  # Exit on any error
+set -euo pipefail
 
-# Parse command line arguments
-ENABLE_COVERAGE=false
-ENABLE_STATIC=false
+usage() {
+  cat <<'USAGE' >&2
+Usage: build.sh [--instrumented|--instrumentation|--coverage] [--static]
+
+Builds the checked-out cvc5 repository from SOLVER_WORKSPACE.
+The final stdout line is always: BINARY_PATH=/abs/path/to/binary
+USAGE
+}
+
+cpu_count() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
+  else
+    sysctl -n hw.logicalcpu
+  fi
+}
+
+MODE="production"
+ENABLE_STATIC="false"
+
 for arg in "$@"; do
-    if [[ "$arg" == "--coverage" ]]; then
-        ENABLE_COVERAGE=true
-    elif [[ "$arg" == "--static" ]]; then
-        ENABLE_STATIC=true
-    fi
+  case "$arg" in
+    --instrumented|--instrumentation|--coverage)
+      MODE="instrumentation"
+      ;;
+    --static)
+      ENABLE_STATIC="true"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      usage
+      exit 2
+      ;;
+  esac
 done
 
-if [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "🔍 Coverage instrumentation will be enabled"
+SOLVER_ROOT="${SOLVER_WORKSPACE:-$(pwd)/cvc5}"
+if [[ ! -d "$SOLVER_ROOT" ]]; then
+  echo "Missing solver workspace: $SOLVER_ROOT" >&2
+  exit 1
 fi
+
+if [[ ! -x "$SOLVER_ROOT/configure.sh" ]]; then
+  echo "Missing cvc5 configure script: $SOLVER_ROOT/configure.sh" >&2
+  exit 1
+fi
+
+echo "Building cvc5 in $SOLVER_ROOT" >&2
+echo "Mode: $MODE" >&2
+
+cd "$SOLVER_ROOT"
+rm -rf build
+
+CONFIGURE_ARGS=(--auto-download)
 if [[ "$ENABLE_STATIC" == "true" ]]; then
-    echo "📦 Static binary build will be enabled"
+  CONFIGURE_ARGS+=(--static --static-binary)
 fi
 
-echo "🔧 Installing basic tools..."
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  git \
-  python3 \
-  python3-pip \
-  ccache \
-  libbsd-dev \
-  libcln-dev \
-  libedit-dev \
-  libgmp-dev \
-  libtinfo-dev \
-  libfl-dev
-
-# Install coverage tools if coverage is enabled (standalone or with static)
-if [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "📊 Installing coverage tools..."
-    sudo apt-get install -y lcov gcc
-    # Install fastcov and psutil for coverage analysis
-    pip3 install fastcov psutil
-    
-    # Set environment variables for coverage collection
-    export GCOV_PREFIX=$(pwd)/cvc5/build
-    export GCOV_PREFIX_STRIP=0
-    export TEST_TIMEOUT=120
-    echo "🔧 Set coverage environment variables:"
-    echo "  GCOV_PREFIX=$GCOV_PREFIX"
-    echo "  GCOV_PREFIX_STRIP=$GCOV_PREFIX_STRIP"
-    echo "  TEST_TIMEOUT=$TEST_TIMEOUT"
-fi
-
-echo "📥 Cloning CVC5 repository..."
-if [ -d "cvc5" ]; then
-    echo "⚠️  CVC5 directory already exists, skipping clone"
+if [[ "$MODE" == "instrumentation" ]]; then
+  ./configure.sh debug --coverage --assertions "${CONFIGURE_ARGS[@]}" >&2
 else
-    git clone https://github.com/cvc5/cvc5.git cvc5
+  ./configure.sh production "${CONFIGURE_ARGS[@]}" >&2
 fi
 
-echo "🔧 Setting up Python environment..."
-python3 -m venv ~/.venv
-source ~/.venv/bin/activate
-python3 -m pip install --upgrade pip
+make -C build -j"$(cpu_count)" >&2
 
-echo "🔨 Building CVC5..."
-cd cvc5
-
-# Configure build based on flags
-if [[ "$ENABLE_STATIC" == "true" ]] && [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "📦 Configuring CVC5 for static binary with coverage..."
-    ./configure.sh debug --coverage --assertions --static --static-binary --auto-download
-elif [[ "$ENABLE_STATIC" == "true" ]]; then
-    echo "📦 Configuring CVC5 for static binary (production)..."
-    ./configure.sh production --static --static-binary --auto-download
-elif [[ "$ENABLE_COVERAGE" == "true" ]]; then
-    echo "🔍 Configuring CVC5 with coverage instrumentation..."
-    ./configure.sh debug --coverage --assertions --auto-download
-else
-    echo "⚡ Configuring CVC5 for production (no coverage)..."
-    ./configure.sh production --auto-download
+BINARY_PATH="$SOLVER_ROOT/build/bin/cvc5"
+if [[ ! -x "$BINARY_PATH" ]]; then
+  echo "Expected executable not found: $BINARY_PATH" >&2
+  exit 1
 fi
 
-cd build
-make -j$(nproc)
-
-# Install to system
-sudo make install
-
-echo "🧪 Testing CVC5 binary..."
-# Test the installed binary
-if command -v cvc5 >/dev/null 2>&1; then
-    cvc5 --version || echo "Version command completed (exit code $?)"
-    echo "CVC5 binary is working correctly!"
-else
-    # Fallback to build directory
-    if [ -f "./bin/cvc5" ]; then
-        ./bin/cvc5 --version || echo "Version command completed (exit code $?)"
-        echo "CVC5 binary is working correctly!"
-    else
-        echo "CVC5 binary not found!"
-        exit 1
-    fi
-fi
-
-echo "✅ CVC5 build and test completed successfully!"
+printf 'BINARY_PATH=%s\n' "$(cd "$(dirname "$BINARY_PATH")" && pwd)/$(basename "$BINARY_PATH")"

@@ -1,0 +1,65 @@
+name: OpenSMT Regression Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Optional suite or path prefix to run (defaults to the full OpenSMT regression corpus)'
+        required: false
+        type: string
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Checkout OpenSMT workspace
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            checkout \
+            --json > checkout.json
+
+      - name: Build OpenSMT with coverage
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract contracts/solvers/opensmt.yml \
+            build \
+            --mode instrumentation \
+            --json > opensmt-build.json
+
+      - name: Run OpenSMT regression tests
+        run: |
+          REGRESSION_ARGS=()
+          if [ -n "${{ inputs.suite }}" ]; then
+            REGRESSION_ARGS+=(--suite "${{ inputs.suite }}")
+          fi
+          ${{ github.workspace }}/scripts/measure_time.sh \
+            python3 \
+            ${{ github.workspace }}/scripts/solver_fuzzing_brain.py \
+            --contract ${{ github.workspace }}/contracts/solvers/opensmt.yml \
+            run-regression \
+            --mode instrumentation \
+            "${REGRESSION_ARGS[@]}"

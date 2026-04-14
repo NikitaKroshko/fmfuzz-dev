@@ -1,0 +1,425 @@
+name: Solver Commit Fuzzer
+
+on:
+  workflow_call:
+    inputs:
+      solver_name:
+        required: true
+        type: string
+      contract_path:
+        required: true
+        type: string
+      run_mode:
+        required: false
+        type: string
+        default: production
+      commit_hash:
+        required: false
+        type: string
+      smoke_test_limit:
+        required: false
+        type: string
+        default: "16"
+      stop_buffer_minutes:
+        required: false
+        type: string
+        default: "5"
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      AWS_REGION:
+        required: false
+      AWS_S3_BUCKET:
+        required: false
+
+jobs:
+  select-target:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.select.outputs.should_run }}
+      commit_to_fuzz: ${{ steps.select.outputs.commit_to_fuzz }}
+      latest_build: ${{ steps.select.outputs.latest_build }}
+      run_mode: ${{ steps.select.outputs.run_mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Validate AWS configuration for production fuzzing
+        if: inputs.run_mode == 'production'
+        env:
+          AWS_ACCESS_KEY_ID_VALUE: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY_VALUE: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION_VALUE: ${{ secrets.AWS_REGION }}
+          AWS_S3_BUCKET_VALUE: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          missing=()
+          if [ -z "$AWS_ACCESS_KEY_ID_VALUE" ]; then missing+=(AWS_ACCESS_KEY_ID); fi
+          if [ -z "$AWS_SECRET_ACCESS_KEY_VALUE" ]; then missing+=(AWS_SECRET_ACCESS_KEY); fi
+          if [ -z "$AWS_REGION_VALUE" ]; then missing+=(AWS_REGION); fi
+          if [ -z "$AWS_S3_BUCKET_VALUE" ]; then missing+=(AWS_S3_BUCKET); fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Production commit fuzzing requires AWS/S3 secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        if: inputs.run_mode == 'production'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Select commit and build
+        id: select
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          if [ "${{ inputs.run_mode }}" != "production" ]; then
+            echo "run_mode=smoke" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "commit_to_fuzz=${{ inputs.commit_hash }}" >> "$GITHUB_OUTPUT"
+            echo "latest_build=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 scripts/scheduling/fuzzer.py "${{ inputs.solver_name }}" select --json > selection.json
+          COMMIT=$(python3 -c "import json; print(json.load(open('selection.json')).get('commit_to_fuzz') or '')")
+          BUILD=$(python3 -c "import json; print(json.load(open('selection.json')).get('latest_build') or '')")
+          echo "run_mode=production" >> "$GITHUB_OUTPUT"
+          if [ -z "$COMMIT" ] || [ -z "$BUILD" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "commit_to_fuzz=" >> "$GITHUB_OUTPUT"
+            echo "latest_build=" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "commit_to_fuzz=$COMMIT" >> "$GITHUB_OUTPUT"
+            echo "latest_build=$BUILD" >> "$GITHUB_OUTPUT"
+          fi
+
+  prepare-matrix:
+    needs: select-target
+    if: needs.select-target.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      total_tests: ${{ steps.matrix.outputs.total_tests }}
+      target_binary: ${{ steps.paths.outputs.target_binary }}
+    steps:
+      - name: Record job start time
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          pip install boto3 psutil requests antlr4-python3-runtime==4.9.2 "yinyang==0.3.0"
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Resolve contract storage layout
+        run: |
+          BUILD_ARTIFACT_S3_PREFIX=$(jq -r '.build_artifact_s3_prefix' contract.json)
+          COVERAGE_MAPPING_S3_PREFIX=$(jq -r '.coverage_mapping_s3_prefix' contract.json)
+          echo "BUILD_ARTIFACT_S3_PREFIX=$BUILD_ARTIFACT_S3_PREFIX" >> "$GITHUB_ENV"
+          echo "COVERAGE_MAPPING_S3_PREFIX=$COVERAGE_MAPPING_S3_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        if: needs.select-target.outputs.run_mode == 'production'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Checkout solver workspace
+        run: |
+          CHECKOUT_COMMIT="${{ needs.select-target.outputs.commit_to_fuzz }}"
+          CHECKOUT_ARGS=()
+          if [ -n "$CHECKOUT_COMMIT" ]; then
+            CHECKOUT_ARGS+=(--commit-hash "$CHECKOUT_COMMIT")
+          fi
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            checkout \
+            "${CHECKOUT_ARGS[@]}" \
+            --json > checkout.json
+
+      - name: Validate contract after checkout
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            validate \
+            --json > contract-validation.json
+
+      - name: Build smoke target
+        if: needs.select-target.outputs.run_mode != 'production'
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            build \
+            --mode production \
+            --json > build.json
+
+      - name: Download production artifact and coverage mapping
+        if: needs.select-target.outputs.run_mode == 'production'
+        run: |
+          mkdir -p artifacts
+          BUILD="${{ needs.select-target.outputs.latest_build }}"
+          aws s3 cp \
+            "s3://${{ secrets.AWS_S3_BUCKET }}/${BUILD_ARTIFACT_S3_PREFIX}/${BUILD}.tar.gz" \
+            artifacts/production.tar.gz
+          aws s3 cp \
+            "s3://${{ secrets.AWS_S3_BUCKET }}/${COVERAGE_MAPPING_S3_PREFIX}/coverage_mapping-${BUILD}.json.gz" \
+            coverage_mapping.json.gz
+          REPO_PATH=$(jq -r '.repository_path' contract.json)
+          tar -xzf artifacts/production.tar.gz -C "$REPO_PATH"
+          gunzip -f coverage_mapping.json.gz
+
+      - name: Resolve target binary
+        id: paths
+        run: |
+          if [ -f build.json ]; then
+            TARGET_BINARY=$(jq -r '.binary_path' build.json)
+          else
+            TARGET_BINARY=$(python3 -c 'import json; from pathlib import Path; c=json.load(open("contract.json")); p=Path(c["production_binary_path"]); w=Path(c["workspace_layout"]["solver_workspace"]); print(p if p.is_absolute() else w / p)')
+          fi
+          echo "target_binary=$TARGET_BINARY" >> "$GITHUB_OUTPUT"
+
+      - name: Build smoke matrix
+        if: needs.select-target.outputs.run_mode != 'production'
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            matrix \
+            --limit-tests "${{ inputs.smoke_test_limit }}" \
+            --max-jobs 1 \
+            --output matrix.json
+
+      - name: Prepare commit-targeted matrix
+        if: needs.select-target.outputs.run_mode == 'production'
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            prepare-commit \
+            "${{ needs.select-target.outputs.commit_to_fuzz }}" \
+            --coverage-json coverage_mapping.json \
+            --output-matrix matrix.json \
+            --tests-per-job 1 \
+            --max-jobs 32
+
+      - name: Publish matrix outputs
+        id: matrix
+        run: |
+          MATRIX=$(jq -c '.matrix' matrix.json)
+          TOTAL_TESTS=$(jq -r '.total_tests' matrix.json)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "total_tests=$TOTAL_TESTS" >> "$GITHUB_OUTPUT"
+          cat matrix.json
+
+      - name: Upload matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.solver_name }}-commit-fuzzer-matrix
+          path: matrix.json
+          retention-days: 3
+
+  run-harness:
+    needs: [select-target, prepare-matrix]
+    if: needs.prepare-matrix.outputs.total_tests != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FMFUZZ_JOB_TIMEOUT_SECONDS: "3600"
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Record job start time
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install harness tooling and contract dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          pip install boto3 psutil requests antlr4-python3-runtime==4.9.2 "yinyang==0.3.0"
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            describe \
+            --json > contract.json
+          PACKAGES=$(jq -r '.environment_requirements.packages[]?' contract.json | tr '\n' ' ')
+          if [ -n "$PACKAGES" ]; then
+            sudo apt-get install -y $PACKAGES
+          fi
+
+      - name: Resolve contract storage layout
+        run: |
+          BUILD_ARTIFACT_S3_PREFIX=$(jq -r '.build_artifact_s3_prefix' contract.json)
+          COVERAGE_MAPPING_S3_PREFIX=$(jq -r '.coverage_mapping_s3_prefix' contract.json)
+          echo "BUILD_ARTIFACT_S3_PREFIX=$BUILD_ARTIFACT_S3_PREFIX" >> "$GITHUB_ENV"
+          echo "COVERAGE_MAPPING_S3_PREFIX=$COVERAGE_MAPPING_S3_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        if: needs.select-target.outputs.run_mode == 'production'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download matrix
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.solver_name }}-commit-fuzzer-matrix
+
+      - name: Checkout solver workspace
+        run: |
+          CHECKOUT_COMMIT="${{ needs.select-target.outputs.commit_to_fuzz }}"
+          CHECKOUT_ARGS=()
+          if [ -n "$CHECKOUT_COMMIT" ]; then
+            CHECKOUT_ARGS+=(--commit-hash "$CHECKOUT_COMMIT")
+          fi
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            checkout \
+            "${CHECKOUT_ARGS[@]}" \
+            --json > checkout.json
+
+      - name: Download production artifact
+        if: needs.select-target.outputs.run_mode == 'production'
+        run: |
+          BUILD="${{ needs.select-target.outputs.latest_build }}"
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            describe \
+            --json > contract.json
+          aws s3 cp \
+            "s3://${{ secrets.AWS_S3_BUCKET }}/${BUILD_ARTIFACT_S3_PREFIX}/${BUILD}.tar.gz" \
+            production.tar.gz
+          REPO_PATH=$(jq -r '.repository_path' contract.json)
+          tar -xzf production.tar.gz -C "$REPO_PATH"
+
+      - name: Rebuild smoke target
+        if: needs.select-target.outputs.run_mode != 'production'
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            build \
+            --mode production \
+            --json > build.json
+
+      - name: Set up reference binary
+        run: |
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            setup-reference \
+            --json > reference.json
+
+      - name: Run harness
+        run: |
+          TESTS_JSON=$(jq -c '.tests' <<< '${{ toJson(matrix) }}')
+          if [ -f build.json ]; then
+            TARGET_BINARY=$(jq -r '.binary_path' build.json)
+          else
+            TARGET_BINARY="${{ needs.prepare-matrix.outputs.target_binary }}"
+          fi
+          REFERENCE_BINARY=$(jq -r '.reference_binary // empty' reference.json)
+          mkdir -p logs bugs
+          ARGS=()
+          if [ -n "$REFERENCE_BINARY" ]; then
+            ARGS+=(--reference-binary "$REFERENCE_BINARY")
+          fi
+          set -o pipefail
+          python3 scripts/solver_fuzzing_brain.py \
+            --contract "${{ inputs.contract_path }}" \
+            run-harness \
+            --tests-json "$TESTS_JSON" \
+            --job-id "${{ matrix.job_name }}" \
+            --job-start-time "$JOB_START" \
+            --stop-buffer-minutes "${{ inputs.stop_buffer_minutes }}" \
+            --iterations 250 \
+            --target-binary "$TARGET_BINARY" \
+            --bugs-folder bugs \
+            "${ARGS[@]}" \
+            |& tee "logs/${{ matrix.job_name }}.log"
+
+      - name: Upload fuzzer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.job_name }}-log
+          path: logs/*.log
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Upload bugs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.job_name }}-bugs
+          path: bugs
+          retention-days: 3
+          if-no-files-found: ignore
+
+  update-fuzz-count:
+    needs: [select-target, run-harness]
+    if: always() && needs.select-target.outputs.should_run == 'true' && needs.select-target.outputs.run_mode == 'production'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update fuzz count and schedule
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          python3 scripts/scheduling/fuzzer.py "${{ inputs.solver_name }}" increment "${{ needs.select-target.outputs.commit_to_fuzz }}"

@@ -1,0 +1,50 @@
+solver_name: cvc5
+repository_url: https://github.com/cvc5/cvc5.git
+repository_path: cvc5
+issues_url: null
+tests_repository_url: null
+tests_repository_path: null
+build_script: scripts/cvc5/build.sh
+production_binary_path: build/bin/cvc5
+coverage_binary_path: build/bin/cvc5
+tests_script: scripts/cvc5/tests.sh
+seeds_dir: FUZZING_SEEDS
+target_commands:
+  - "{reference_binary}"
+  - "{target_binary} --check-models --check-proofs --strings-exp"
+reference_contract_path: contracts/solvers/z3.yml
+oracle_command: null
+coverage_target_job_count: 6
+coverage_average_test_time_seconds: 18.6
+coverage_mapper_command: python3 scripts/cvc5/coverage/coverage_mapper.py --build-dir {build_dir}
+commit_prepare_command: python3 scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py
+regression_kind: command
+regression_command: ctest -L {suite} -j{workers} --output-on-failure
+regression_working_directory: build
+regression_environment:
+  - TEST_TIMEOUT=120
+environment_requirements:
+  packages:
+    - build-essential
+    - cmake
+    - git
+    - python3
+    - ccache
+    - libbsd-dev
+    - libcln-dev
+    - libedit-dev
+    - libfl-dev
+    - libgmp-dev
+    - libtinfo-dev
+  env:
+    - GCOV_PREFIX
+    - GCOV_PREFIX_STRIP
+    - TEST_TIMEOUT
+artifact_paths:
+  - build/bin/cvc5
+  - build/compile_commands.json
+  - build/include
+  - build/src
+  - build/deps
+artifact_s3_bucket: null
+artifact_s3_prefix: solvers/cvc5/builds/v2
