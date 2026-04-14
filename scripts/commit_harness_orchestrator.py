@@ -44,6 +44,7 @@ class CommitHarnessRunner:
         # Stricter threshold (1.5GB) when system memory is low
         'max_process_memory_mb_warning': 1536,
     }
+    HEARTBEAT_INTERVAL_SECONDS = 30
 
     def __init__(
         self,
@@ -71,6 +72,7 @@ class CommitHarnessRunner:
         self.strict_mode = strict_mode
         self.start_time = time.time()
         self.cpu_count = self._cpu_count()
+        self.heartbeat_interval = self._init_heartbeat_interval()
 
         # Set self.num_workers
         self.num_workers = self._init_determine_num_workers(num_workers)
@@ -237,6 +239,19 @@ class CommitHarnessRunner:
                 return timeout_seconds
         # GitHub jobs in this repository are capped at 60 minutes.
         return 3600
+
+    def _init_heartbeat_interval(self) -> Optional[int]:
+        """Return heartbeat interval in seconds, or None when disabled."""
+        raw_interval = os.environ.get("FMFUZZ_HARNESS_HEARTBEAT_SECONDS")
+        if raw_interval is None:
+            return self.HEARTBEAT_INTERVAL_SECONDS
+        try:
+            interval = int(raw_interval)
+        except ValueError:
+            return self.HEARTBEAT_INTERVAL_SECONDS
+        if interval <= 0:
+            return None
+        return max(5, interval)
 
     # Validate required target identifiers are present when template needs
     # them.
@@ -829,6 +844,78 @@ class CommitHarnessRunner:
         with self.resource_lock:
             return self.resource_state.get('paused', False)
 
+    def _queue_size_label(self) -> str:
+        """Return queue size for progress logs when the platform supports it."""
+        try:
+            return str(self.test_queue.qsize())
+        except Exception:
+            return "unknown"
+
+    def _format_current_tests(self) -> str:
+        """Return a compact view of tests currently owned by workers."""
+        try:
+            items = sorted(
+                (int(worker_id), test_name)
+                for worker_id, test_name in self.current_tests.items()
+            )
+        except Exception:
+            return "unknown"
+        if not items:
+            return "none"
+        return "; ".join(
+            f"worker_{worker_id}={test_name}"
+            for worker_id, test_name in items
+        )
+
+    def _format_resource_snapshot(self) -> str:
+        """Return current resource state for heartbeat logs."""
+        try:
+            status = self.resource_state.get("status", "unknown")
+            avg_cpu = self.resource_state.get("avg_cpu")
+            max_cpu = self.resource_state.get("max_cpu")
+            memory_available_gb = self.resource_state.get("memory_available_gb")
+            memory_percent = self.resource_state.get("memory_percent")
+        except Exception:
+            return "resources=unknown"
+
+        if avg_cpu is None or max_cpu is None or memory_available_gb is None:
+            return f"resources={status}"
+        return (
+            f"resources={status}, cpu_avg={avg_cpu:.1f}%, "
+            f"cpu_max={max_cpu:.1f}%, mem_available={memory_available_gb:.2f}GB, "
+            f"mem_used={memory_percent:.1f}%"
+        )
+
+    def _log_heartbeat(self):
+        """Print periodic progress so quiet harness subprocesses are visible."""
+        stats = {
+            "processed": self.stats.get("tests_processed", 0),
+            "requeued": self.stats.get("tests_requeued", 0),
+            "unsupported": self.stats.get("tests_removed_unsupported", 0),
+            "timeouts": self.stats.get("tests_removed_timeout", 0),
+            "bugs": self.stats.get("bugs_found", 0),
+        }
+        remaining = self._get_time_remaining()
+        remaining_text = (
+            "unbounded"
+            if remaining == float("inf")
+            else f"{int(remaining)}s"
+        )
+        print(
+            (
+                "[HEARTBEAT] "
+                f"remaining={remaining_text}, queue={self._queue_size_label()}, "
+                f"processed={stats['processed']}, requeued={stats['requeued']}, "
+                f"unsupported={stats['unsupported']}, timeouts={stats['timeouts']}, "
+                f"bugs={stats['bugs']}; {self._format_resource_snapshot()}"
+            ),
+            flush=True,
+        )
+        print(
+            f"[HEARTBEAT] active tests: {self._format_current_tests()}",
+            flush=True,
+        )
+
     @staticmethod
     def _resolve_target_command(identifier: str) -> List[str]:
         """Split a target identifier string into an argv list."""
@@ -1290,6 +1377,12 @@ class CommitHarnessRunner:
         print(f"CPU cores: {self.cpu_count}", flush=True)
         print(f"Workers: {self.num_workers}", flush=True)
         print(f"Strict mode: {self.strict_mode}", flush=True)
+        heartbeat_text = (
+            f"every {self.heartbeat_interval}s"
+            if self.heartbeat_interval
+            else "disabled"
+        )
+        print(f"Heartbeat: {heartbeat_text}", flush=True)
         target_text = (
             ", ".join(shlex.join(command) for command in self.target_commands)
             if self.target_commands
@@ -1326,18 +1419,31 @@ class CommitHarnessRunner:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        last_heartbeat = time.time()
         try:
             if self.time_remaining:
                 end_time = self.start_time + self.time_remaining
                 while time.time() < end_time and any(w.is_alive()
                                                      for w in workers):
                     time.sleep(1)
+                    if (
+                        self.heartbeat_interval
+                        and time.time() - last_heartbeat >= self.heartbeat_interval
+                    ):
+                        self._log_heartbeat()
+                        last_heartbeat = time.time()
                 if time.time() >= end_time:
                     print("⏰ Timeout reached, stopping workers...", flush=True)
                     self.shutdown_event.set()
             else:
-                for worker in workers:
-                    worker.join()
+                while any(w.is_alive() for w in workers):
+                    time.sleep(1)
+                    if (
+                        self.heartbeat_interval
+                        and time.time() - last_heartbeat >= self.heartbeat_interval
+                    ):
+                        self._log_heartbeat()
+                        last_heartbeat = time.time()
         except KeyboardInterrupt:
             print("\n⏰ Interrupted, stopping workers...", flush=True)
             self.shutdown_event.set()

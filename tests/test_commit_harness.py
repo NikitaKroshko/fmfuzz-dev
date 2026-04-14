@@ -813,6 +813,39 @@ index 1111111..2222222 100644
                 3180,
             )
 
+    def test_commit_harness_runner_heartbeat_reports_progress(self) -> None:
+        from scripts.commit_harness_orchestrator import CommitHarnessRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests_root = root / "tests"
+            tests_root.mkdir()
+
+            runner = CommitHarnessRunner(
+                tests=["seed.smt2"],
+                tests_root=str(tests_root),
+                bugs_folder=str(root / "bugs"),
+                num_workers=1,
+                iterations=1,
+                modulo=1,
+                time_remaining=1234,
+                targets=None,
+                harness='["/bin/true"]',
+            )
+            runner.current_tests[1] = "seed.smt2"
+            runner.stats["tests_processed"] = 2
+            runner.stats["tests_requeued"] = 1
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                runner._log_heartbeat()
+
+            output = stdout.getvalue()
+            self.assertIn("[HEARTBEAT] remaining=", output)
+            self.assertIn("processed=2", output)
+            self.assertIn("requeued=1", output)
+            self.assertIn("worker_1=seed.smt2", output)
+
     def test_opensmt_prepare_commit_fuzzer_uses_commit_diff_and_matched_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
